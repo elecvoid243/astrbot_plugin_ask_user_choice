@@ -27,3 +27,13 @@ async def test_register_resolve_basic():
     assert reg.try_resolve(key, "A") is True
     assert fut.result() == "A"
     assert reg.has_pending(key) is False
+
+
+@pytest.mark.asyncio
+async def test_created_at_is_monotonic():
+    reg = PendingRegistry()
+    fut = asyncio.get_event_loop().create_future()
+    before = __import__("time").monotonic()
+    req = PendingRequest(key=("u", "s"), future=fut, prompt="p")
+    after = __import__("time").monotonic()
+    assert before <= req.created_at <= after

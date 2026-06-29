@@ -8,6 +8,7 @@ Spec: docs/superpowers/specs/2026-06-29-ask-user-choice-suspension-design.md §4
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -29,13 +30,7 @@ class PendingRequest:
     prompt: str = ""
     """选项框的 prompt(用于日志/调试)"""
 
-    created_at: float = field(default_factory=float)
-    """实际用 monotonic,但 0.0 占位避免导入 side-effect;真实代码见 Task 2
-
-    注:计划原写法 ``asyncio.get_event_loop().time if False else 0.0`` 在 Task 1
-    这一阶段是有 bug 的(``0.0`` 是 float 不可调用,会炸);这里用 ``float`` 类型
-    作为占位 callable(``float()`` 返回 ``0.0``),Task 2 改为 ``time.monotonic``。
-    """
+    created_at: float = field(default_factory=time.monotonic)
 
     timeout_seconds: int = 300
 

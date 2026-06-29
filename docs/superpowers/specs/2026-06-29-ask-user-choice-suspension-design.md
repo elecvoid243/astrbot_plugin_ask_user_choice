@@ -127,6 +127,7 @@ EventBus 收到新 user message
 # pending_registry.py
 from dataclasses import dataclass, field
 from asyncio import Future
+from uuid import uuid4
 import time
 
 @dataclass
@@ -134,7 +135,10 @@ class PendingRequest:
     """一次 ask_user_choice 调用的挂起态。"""
     key: tuple[str, str]              # (unified_msg_origin, sender_id)
     future: Future[str]               # 等待用户回执(文本)
-    tool_call_id: str                 # LLM 工具调用 id(用于日志关联)
+    pending_id: str = field(default_factory=lambda: uuid4().hex[:12])
+    """自生成的短 id,用于跨 tool.call 与 on_message 的日志关联。
+    注:AstrBot 的 ContextWrapper 没有暴露 LLM tool_call_id 字段,
+    所以我们用自生成 id 而非依赖框架字段。"""
     prompt: str                       # 选项框的 prompt(用于日志/调试)
     created_at: float = field(default_factory=time.monotonic)
     timeout_seconds: int = 300        # 用于日志显示
@@ -164,13 +168,18 @@ from typing import Any
 class PendingRegistry:
     def __init__(self) -> None:
         self._pending: dict[tuple[str, str], PendingRequest] = {}
-        self._lock = asyncio.Lock()  # 保证 has_pending + register 原子
 
     def has_pending(self, key: tuple[str, str]) -> bool:
         return key in self._pending
 
     def register(self, req: PendingRequest) -> None:
-        """tool.call() 调用。已存在同 key 时由调用方处理拒绝逻辑。"""
+        """tool.call() 调用。已存在同 key 时由调用方处理拒绝逻辑。
+
+        并发安全:asyncio 是单线程的,dict 写入 (__setitem__) 不会被
+        其他协程抢占;调用方必须保证 "has_pending + register" 块内
+        **没有 await**(否则 on_message 钩子可能在两次同步操作之间
+        介入,造成竞态)。本 spec §5.1 严格遵守此约束。
+        """
         self._pending[req.key] = req
 
     def try_resolve(self, key: tuple[str, str], text: str) -> bool:
@@ -242,11 +251,12 @@ async def call(self, context, **kwargs):
         )
 
     # 5. 注册 pending + 阻塞
+    #    注:has_pending + register 块内不能有 await,否则 on_message 钩子
+    #    可能在这两个同步操作之间介入(见 PendingRegistry 注释)。
     fut = asyncio.get_running_loop().create_future()
     req = PendingRequest(
         key=key,
         future=fut,
-        tool_call_id=context.tool_call_id or "<unknown>",  # 取决于 ContextWrapper API
         prompt=prompt,
         timeout_seconds=self._timeout_seconds,
     )
@@ -254,7 +264,7 @@ async def call(self, context, **kwargs):
     logger.info(
         f"ask_user_choice: pending registered "
         f"(umo={event.unified_msg_origin}, sender={event.get_sender_id()}, "
-        f"tool_call_id={req.tool_call_id})"
+        f"pending_id={req.pending_id})"
     )
 
     try:
@@ -264,7 +274,7 @@ async def call(self, context, **kwargs):
     except asyncio.TimeoutError:
         logger.warning(
             f"ask_user_choice: timeout after {self._timeout_seconds}s "
-            f"(tool_call_id={req.tool_call_id})"
+            f"(pending_id={req.pending_id})"
         )
         return (
             f"Error: User did not respond within {self._timeout_seconds} seconds. "
@@ -296,6 +306,8 @@ async def on_user_message(self, event: AstrMessageEvent):
     # resolve
     if self._tool._registry.try_resolve(key, user_text):
         event.stop_event()  # 阻止新 LLM 轮
+        # 注意:event.stop_event() 在 process_stage 的 star_request_sub_stage 阶段调用,
+        # 之后 agent_sub_stage(LLM 调用)会被跳过(见 process_stage/stage.py)。
         logger.info(
             f"ask_user_choice: user reply resolved "
             f"(umo={event.unified_msg_origin}, sender={event.get_sender_id()}, "
@@ -406,11 +418,11 @@ f"Error: User did not respond within {N} seconds. Please decide how to proceed (
 
 | 事件 | level | 关键字段 |
 |------|-------|---------|
-| pending 注册 | `info` | `tool_call_id, umo, sender_id, prompt` |
-| 用户回复 resolve | `info` | `tool_call_id, umo, sender_id, user_text_len` |
-| 超时 | `warning` | `tool_call_id, umo, sender_id, timeout_seconds` |
-| 并发拒绝 | `warning` | `umo, sender_id` |
-| `event.send` 失败 | `error` | `umo, exc` |
+| pending 注册 | `info` | `pending_id, umo, sender_id, prompt` |
+| 用户回复 resolve | `info` | `pending_id, umo, sender_id, user_text_len` |
+| 超时 | `warning` | `pending_id, umo, sender_id, timeout_seconds` |
+| 并发拒绝 | `warning` | `pending_id, umo, sender_id` |
+| `event.send` 失败 | `error` | `pending_id, umo, exc` |
 | `cleanup_all` | `info` | `count` |
 
 ---
@@ -469,7 +481,7 @@ async def test_register_resolve_basic():
     reg = PendingRegistry()
     key = ("umo:x", "sender:1")
     fut = asyncio.get_event_loop().create_future()
-    reg.register(PendingRequest(key=key, future=fut, tool_call_id="t1", prompt="p"))
+    reg.register(PendingRequest(key=key, future=fut, prompt="p"))
     assert reg.has_pending(key)
     assert reg.try_resolve(key, "A") is True
     assert fut.result() == "A"
@@ -485,16 +497,27 @@ async def test_resolve_already_resolved_returns_false():
     reg = PendingRegistry()
     key = ("umo", "s")
     fut = asyncio.get_event_loop().create_future()
-    reg.register(PendingRequest(key=key, future=fut, tool_call_id="t", prompt="p"))
+    reg.register(PendingRequest(key=key, future=fut, prompt="p"))
     fut.set_result("first")
     assert reg.try_resolve(key, "second") is False
+
+@pytest.mark.asyncio
+async def test_pending_id_is_unique():
+    reg = PendingRegistry()
+    ids = set()
+    for i in range(5):
+        fut = asyncio.get_event_loop().create_future()
+        req = PendingRequest(key=(f"umo{i}", f"s{i}"), future=fut, prompt="p")
+        reg.register(req)
+        ids.add(req.pending_id)
+    assert len(ids) == 5  # 全部唯一
 
 @pytest.mark.asyncio
 async def test_concurrent_reject():
     reg = PendingRegistry()
     key = ("umo", "s")
     fut1 = asyncio.get_event_loop().create_future()
-    reg.register(PendingRequest(key=key, future=fut1, tool_call_id="t1", prompt="p1"))
+    reg.register(PendingRequest(key=key, future=fut1, prompt="p1"))
     assert reg.has_pending(key)
 
 @pytest.mark.asyncio
@@ -502,7 +525,7 @@ async def test_cancel():
     reg = PendingRegistry()
     key = ("umo", "s")
     fut = asyncio.get_event_loop().create_future()
-    reg.register(PendingRequest(key=key, future=fut, tool_call_id="t", prompt="p"))
+    reg.register(PendingRequest(key=key, future=fut, prompt="p"))
     assert reg.cancel(key, reason="test") is True
     with pytest.raises(asyncio.CancelledError):
         fut.result()
@@ -513,8 +536,7 @@ async def test_cleanup_all():
     futures = []
     for i in range(3):
         fut = asyncio.get_event_loop().create_future()
-        reg.register(PendingRequest(key=(f"umo{i}", f"s{i}"), future=fut,
-                                     tool_call_id=f"t{i}", prompt="p"))
+        reg.register(PendingRequest(key=(f"umo{i}", f"s{i}"), future=fut, prompt="p"))
         futures.append(fut)
     reg.cleanup_all()
     for fut in futures:
@@ -587,7 +609,19 @@ async def test_cleanup_all():
 
 ---
 
-## 12. 参考
+## 12. 自审修正记录
+
+spec 自审循环中发现的 3 处修正：
+
+| # | 问题 | 修正 |
+|---|------|------|
+| 1 | 原 spec 使用 `context.tool_call_id` 字段,但 AstrBot 的 `ContextWrapper`（`astrbot/core/agent/run_context.py`）只有 `context / messages / tool_call_timeout` 三个字段，没有暴露 `tool_call_id` | 改为自生成 `pending_id: str = field(default_factory=lambda: uuid4().hex[:12])`，用于日志关联 |
+| 2 | 原 spec 在 `PendingRegistry` 里加了 `asyncio.Lock`，但 asyncio 单线程下 dict 操作是原子同步的，锁是过度设计 | 删除锁；改为在 `register` docstring 中**明确"has_pending + register 块内不能有 await"**这一不变量 |
+| 3 | 原 spec 未解释 `on_message` 钩子的"为什么 stop_event 能阻止 LLM 调用" | 在 §5.2 加注释引用 `astrbot/core/pipeline/process_stage/stage.py`：process_stage 阶段先跑 `star_request_sub_stage`（包含 on_message 钩子），再跑 `agent_sub_stage`（LLM 调用）。在钩子里 stop_event 后，agent_sub_stage 会被跳过 |
+
+---
+
+## 13. 参考
 
 - AGENTS.md §2.1 / §2.3 / §2.4 / §3.8 / §3.9 / §4.2 — 项目规范
 - AGENTS.md §3.5 — 命名约定

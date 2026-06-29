@@ -1,13 +1,13 @@
 # Author: elecvoid243
-# Date: 2026-06-28
-# Spec: docs/superpowers/specs/2026-06-28-dynamic-choice-box-rendering-design.md §5.3 + §11
+# Date: 2026-06-29
+# Spec: docs/superpowers/specs/2026-06-29-ask-user-choice-suspension-design.md §6
 #
 # AstrBot 插件元数据。name 字段必须与目录名一致(以便 AstrBot 在 plugins/
 # 扫描时识别),version 字段遵循 vMAJOR.MINOR.PATCH 语义化版本约定。
 name: astrbot_plugin_ask_user
 display_name: Ask User Choice
-desc: 让 LLM 通过 ask_user_choice 工具向用户呈现可交互选项框（单选 + 自由输入）。
-version: v0.2.0
+desc: 让 LLM 通过 ask_user_choice 工具向用户呈现可交互选项框（单选 + 自由输入），并阻塞 LLM 工具循环等待用户回复。
+version: v0.3.0
 author: elecvoid243
 repo: https://github.com/elecvoid243/astrbot_plugin_ask_user
 astrbot_version: ">=4.16,<5"

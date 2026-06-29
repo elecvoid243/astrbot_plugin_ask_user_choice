@@ -54,7 +54,7 @@ class AskUserChoiceTool(FunctionTool):
     description: str = (
         "Present an interactive option box to the user, where they click on one of the options. The tool will return a formatted JSON, which will be displayed as option box in the frontend."
         "Use it when 1) Requires user authorization for sensitive/irreversible operations; 2) Let users make a decision among multiple candidate solutions."
-        "After calling the tool, IMMEDIATELY PAUSE THE CURRENT TASK and wait for user's response."
+        "After calling the tool, this tool **blocks** the LLM tool loop until the user clicks a button or types text. The tool will return the user's reply as text."
     )
 
     parameters: dict = field(

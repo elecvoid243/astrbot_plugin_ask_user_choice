@@ -1,13 +1,19 @@
 # Author: elecvoid243
-# Date: 2026-06-28
+# Date: 2026-06-30
 # Spec: docs/superpowers/specs/2026-06-28-dynamic-choice-box-rendering-design.md §5.3 + §11
 #
 # AstrBot 插件元数据。name 字段必须与目录名一致(以便 AstrBot 在 plugins/
 # 扫描时识别),version 字段遵循 vMAJOR.MINOR.PATCH 语义化版本约定。
+#
+# v0.3.0 (2026-06-30): P1+P2 软阻塞增强
+#   - description 改为更硬的话术("HARD RULES", "MUST NOT", "turn is OVER")
+#   - 新增 @filter.on_llm_request 钩子,向 system_prompt 末尾注入
+#     ask_user_choice 使用规范,marker = "# ask_user_choice 工具使用规范"
+#   - 不做真阻塞(P0 已被否决),只是加大 LLM 自觉执行的概率。
 name: astrbot_plugin_ask_user
 display_name: Ask User Choice
-desc: 让 LLM 通过 ask_user_choice 工具向用户呈现可交互选项框（单选 + 自由输入）。
-version: v0.2.0
+desc: 让 LLM 通过 ask_user_choice 工具向用户呈现可交互选项框（单选 + 自由输入）。v0.3 起在 system_prompt 注入硬性使用规范以引导 LLM 调完即停。
+version: v0.3.0
 author: elecvoid243
 repo: https://github.com/elecvoid243/astrbot_plugin_ask_user
 astrbot_version: ">=4.16,<5"

@@ -9,26 +9,46 @@
 - 工具定义: spec §11
 - 启停配置: docs/superpowers/specs/2026-06-28-toggle-config-design.md
 
+v0.3.0 新增(vs v0.2.0):
+- 硬话术 tool description:P1
+- 通过 ``@filter.on_llm_request()`` 钩子向 ``req.system_prompt``
+  末尾注入 ``ask_user_choice`` 使用规范:P2
+- 两者配合,放大 LLM "调完即停" 的概率。
+  不做真阻塞(p0 已由用户否决),所以是 "软阻塞" 方案。
+
 Author: elecvoid243
-Date: 2026-06-28
+Date: 2026-06-28 (v0.1) / 2026-06-30 (v0.3)
 """
 
 from __future__ import annotations
 
 from astrbot.api import logger, star
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Star
 from astrbot.core.config import AstrBotConfig
 
-from .ask_user_choice_tool import AskUserChoiceTool
+from .ask_user_choice_tool import (
+    INJECTION_MARKER,
+    AskUserChoiceTool,
+    build_injection_policy,
+)
 
 
 class AskUserChoicePlugin(Star):
     """astrbot_plugin_ask_user 主类。
 
-    加载时把 :class:`AskUserChoiceTool` 注册为全局 LLM 工具。
-    若插件配置 ``enabled=false`` 则跳过注册,实现"功能开关"效果。
+    加载时:
+    - 把 :class:`AskUserChoiceTool` 注册为全局 LLM 工具;
+    - 通过 ``@filter.on_llm_request()`` 钩子在每次 LLM 请求前,
+      向 ``req.system_prompt`` 末尾注入 ask_user_choice 使用规范。
+
+    两者配合提高 LLM 在调用 ``ask_user_choice`` 后"自觉停下"的概率。
 
     运行时配置:见 ``_conf_schema.json``,当前仅含 ``enabled`` 字段。
+    ``enabled=false`` 时:
+    - 不注册工具(LLM 看不到 ask_user_choice);
+    - 不注入策略(不污染系统提示词)。
 
     注:
         ``__init__`` 的 ``config`` 参数由 AstrBot 的
@@ -63,6 +83,46 @@ class AskUserChoicePlugin(Star):
             return
 
         self.context.add_llm_tools(AskUserChoiceTool())
+
+    @filter.on_llm_request()
+    async def _inject_ask_user_choice_policy(
+        self, event: AstrMessageEvent, req: ProviderRequest
+    ) -> None:
+        """每次 LLM 请求前,把 ask_user_choice 使用规范追加到 system_prompt。
+
+        行为:
+            1. ``enabled=false`` → 直接 return,不污染 system_prompt。
+            2. ``req.system_prompt`` 已包含 ``INJECTION_MARKER`` → 跳过,
+               防止多 hook 链式触发时重复注入。
+            3. ``req.system_prompt`` 为 None/空 → 直接赋值(去前导换行)。
+            4. 否则 → 追加到末尾。
+
+        参考实现:``astrbot_plugin_spcode_toolkit`` 的
+        ``tools/agentsmd/_handlers.py:AgentsmdHandlers.on_llm_request``。
+        同样采用 "marker 防重复 + 空字符串特判" 的范式。
+        """
+        # 1) 启停开关
+        if not bool(self.config.get("enabled", True)):
+            return
+
+        system_prompt = req.system_prompt or ""
+
+        # 2) marker 检测:已经注入过(例如上游 hook 替我们注入了)就跳过
+        if INJECTION_MARKER in system_prompt:
+            return
+
+        # 3) + 4) 追加或新建
+        if not system_prompt:
+            # 空 system_prompt:去掉前导换行,避免裸 \n 开头
+            req.system_prompt = build_injection_policy().lstrip("\n")
+        else:
+            req.system_prompt = system_prompt + build_injection_policy()
+
+        logger.debug(
+            "ask_user_choice: 已向 system_prompt 注入工具使用规范 "
+            "(注入后长度 %d 字符)",
+            len(req.system_prompt),
+        )
 
 
 __all__ = ["AskUserChoicePlugin"]

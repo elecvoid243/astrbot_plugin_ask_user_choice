@@ -9,9 +9,13 @@ ask_user_choice 工具:让 LLM 在需要人类审批/选择时输出结构化选
 - 中间格式字段约束: spec §3.2
 - 工具层校验/截断策略: spec §11.1
 - 错误处理 (降级为 unknown-part): spec §7
+- v0.3.0 软阻塞增强(P1+P2):AGENTS.md §4.3.1
+  - P1:本文件 ``description`` 字段改为硬话术(英文)
+  - P2:策略文本 + marker + build_injection_policy() 函数
+    由 ``main.py`` 通过 ``@filter.on_llm_request()`` 钩子注入 system_prompt
 
 Author: elecvoid243
-Date: 2026-06-28
+Date: 2026-06-28 (v0.1) / 2026-06-30 (v0.3)
 """
 
 from __future__ import annotations
@@ -37,13 +41,43 @@ _OPTIONS_MIN = 2
 _OPTIONS_MAX = 10
 
 
+INJECTION_MARKER = "# ask_user_choice tool policy"
+
+_SYSTEM_PROMPT_POLICY = (
+    "After calling `ask_user_choice`, your turn is OVER: "
+    "output no text, call no other tools, and wait for the user's response "
+    "(it arrives as a regular user message in the next turn). "
+    "The tool's return value is a frontend rendering protocol and carries no "
+    "information about the user's choice."
+)
+
+
+def build_injection_policy() -> str:
+    """构造待追加到 ``req.system_prompt`` 末尾的策略文本。
+
+    格式::
+
+        \\n\\n# ask_user_choice tool policy\\n\\n
+        <policy>
+
+    Returns:
+        含前导换行的完整注入块。``main.py`` 在空 system_prompt 时
+        用 ``.lstrip("\\n")`` 去掉前导换行,避免空 prompt 出现裸 \\n。
+    """
+    return f"\n\n{INJECTION_MARKER}\n\n{_SYSTEM_PROMPT_POLICY}"
+
+
 @dataclass
 class AskUserChoiceTool(FunctionTool):
     name: str = "ask_user_choice"
     description: str = (
-        "Present an interactive option box to the user, where they click on one of the options. The tool will return a formatted JSON, which will be displayed as option box in the frontend."
-        "Use it when 1) Requires user authorization for sensitive/irreversible operations; 2) Let users make a decision among multiple candidate solutions."
-        "After calling the tool, IMMEDIATELY PAUSE THE CURRENT TASK and wait for user's response."
+        "Present an interactive option box so the user can pick one option "
+        "(or type a custom answer). Use it ONLY for: (1) authorizing "
+        "sensitive/irreversible actions, or (2) choosing among multiple "
+        "candidate solutions. "
+        "After calling this tool your turn is OVER: no more text, no more reasoning, no more tool calls."
+        "Do not infer anything from the return value (it is just a frontend rendering protocol). "
+        "Wait for the user's choice to arrive as a regular user message in the next turn."
     )
 
     parameters: dict = field(
@@ -175,4 +209,8 @@ class AskUserChoiceTool(FunctionTool):
         return json.dumps(payload, ensure_ascii=False)
 
 
-__all__ = ["AskUserChoiceTool"]
+__all__ = [
+    "AskUserChoiceTool",
+    "INJECTION_MARKER",
+    "build_injection_policy",
+]

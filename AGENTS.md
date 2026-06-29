@@ -344,6 +344,28 @@ LLM  ──(tool call: ask_user_choice(options=[...]))──▶  AstrBot
 
 **关键点**: 从 AstrBot 侧看,用户的选择就是一个普通 `UserMessage`,不带任何工具调用标记。**这是设计,不是 bug —— 不要试图加 sentinel**。
 
+#### 4.3.1 软阻塞(soft-blocking) — v0.3.0+
+
+`AskUserChoiceTool.call()` **不会真阻塞 LLM**:`call()` 立即返回 JSON,框架把 tool result 喂给 LLM 后,LLM 仍可能继续输出文字 / 调其他工具 / 自己做假设。"LLM 是否在选项框出现后停下"完全靠 LLM 自觉。
+
+v0.3.0 通过两道 prompt-level 强化提高自觉率(P0 真阻塞已被用户否决):
+
+| 强化层 | 实现 | 命中时机 |
+|---|---|---|
+| **P1 硬话术 tool description** | `ask_user_choice_tool.py:description` 字段,包含 `HARD RULES` / `MUST NOT` / `turn is OVER` 等强语气短语 | LLM 决定调不调、看 description 时 |
+| **P2 system_prompt 注入** | `main.py:AskUserChoicePlugin._inject_ask_user_choice_policy` 通过 `@filter.on_llm_request()` 钩子,把 `# ask_user_choice tool policy` 段追加到 `req.system_prompt` 末尾;marker 防重复 | 每次 LLM 请求前 |
+
+参考实现来自 `astrbot_plugin_spcode_toolkit` 的 `tools/agentsmd/_handlers.py:AgentsmdHandlers.on_llm_request`(同样采用 "marker 防重复 + 空字符串特判")。
+
+**为什么不做真阻塞(P0)?** 真阻塞需要在 `call()` 里 `await` 用户响应,会挂起 agent runner 协程,需要新增前端 submit 事件回传 + `asyncio.Future` 跨协程解锁,工程量大且牵涉 AstrBot 框架。软阻塞在绝大多数 LLM(Claude / GPT-4o / DeepSeek 等)上效果已够用。
+
+**已知失效场景**(软阻塞救不回来的):
+- 弱指令跟随的 LLM 仍可能调 `ask_user_choice` 之后又输出 "我先帮你做 X"
+- LLM 在同一条 assistant 消息里连续调多个 `ask_user_choice`(框架本身会串行执行,但 LLM 的"一次性提问"语义被破坏)
+- LLM 在 tool result 之后立刻调别的工具(如 `astrbot_execute_shell`)而不管选项框
+
+要根治这些问题,必须走 P0 真阻塞方案。
+
 ### 4.4 架构原则
 
 1. **薄插件**: 业务尽量推给 AstrBot SDK / 前端,本插件只做"格式转换 + 参数校验"。

@@ -10,6 +10,25 @@
 
 ---
 
+## 版本历史
+
+### v0.3.0 (2026-06-29) — 阻塞式等待
+
+**行为变更**:`ask_user_choice` 工具现在会**真实阻塞 LLM 工具循环**直到用户点击按钮 / 输入文本 / 超时。在用户回复前,LLM 不会执行后续步骤。
+
+**新增配置项**:
+- `timeout_seconds`(int,默认 `300`,`-1` 表示无限等待)
+
+**已知限制**:
+- AstrBot 进程重启 / 插件热重载会丢弃所有挂起的请求(等价于超时,飞行中的 LLM 任务被一起取消,无孤儿 Future)。
+- `timeout_seconds = -1` 时,工具循环会永久挂起,必须用户回复或 AstrBot 重启才恢复。
+- 群聊里同一 sender 的下一条消息会被消费为回执;其他 sender 的消息按 AstrBot 正常流程走。
+- 平台必须支持 `event.send(MessageChain)`,已验证 WebChat,其他平台走相同 API 应同样工作。
+
+**完整规范**:`docs/superpowers/specs/2026-06-29-ask-user-choice-suspension-design.md`
+
+---
+
 ## 功能
 
 LLM 经常需要在"是否执行危险操作"这种决策点上寻求人类授权(例如删除文件、运行脚本、批量重命名)。

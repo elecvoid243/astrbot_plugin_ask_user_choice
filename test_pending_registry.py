@@ -8,7 +8,6 @@ Spec: docs/superpowers/specs/2026-06-29-ask-user-choice-suspension-design.md §4
 from __future__ import annotations
 
 import asyncio
-from uuid import uuid4
 
 import pytest
 
@@ -31,7 +30,6 @@ async def test_register_resolve_basic():
 
 @pytest.mark.asyncio
 async def test_created_at_is_monotonic():
-    reg = PendingRegistry()
     fut = asyncio.get_event_loop().create_future()
     before = __import__("time").monotonic()
     req = PendingRequest(key=("u", "s"), future=fut, prompt="p")

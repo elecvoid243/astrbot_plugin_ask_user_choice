@@ -1042,3 +1042,189 @@ git push origin v0.3.0
 - 群聊里 `@bot` 才触发 LLM 响应,我们的 `stop_event()` 在 `@bot` 触发的消息流中也生效(star_request_sub_stage 仍先运行)。
 
 **Spec 引用**: `docs/superpowers/specs/2026-06-29-ask-user-choice-suspension-design.md`
+
+---
+
+## 附录 A:人工端到端 checklist(Chunk 5 产出)
+
+> **背景**:Task 12 列出 4 个必跑场景(4 / 6 / 7 / 9),完整端到端验证需要
+> 真实 AstrBot 进程 + WebChat 客户端。本附录是"如何人工跑这些场景"
+> 的检查清单,父代理或人按部就班照着跑即可。
+> 场景 1(加载)已在 Task 11 完成代码层验证;AstrBot 启动后只需
+> 看日志 `plugin loaded: astr_user` 无 traceback 即可。
+
+### 前置条件
+
+1. **AstrBot 进程就绪**:在 `F:\github\Astrbot` 跑 `python -m astrbot`,
+   启动后无报错(已有 v0.2.0 插件能正常加载)。
+2. **本插件已软链/复制到 AstrBot plugins 目录**:
+   ```bash
+   # Windows(cmd)
+   mklink /D F:\github\Astrbot\data\plugins\astrbot_plugin_ask_user F:\github\astrbot_plugin_ask_user_choice
+   ```
+   或直接复制 `F:\github\astrbot_plugin_ask_user_choice` 到
+   `F:\github\Astrbot\data\plugins\astrbot_plugin_ask_user`。
+3. **WebChat 已登录**,能与 AstrBot 私聊。
+4. **在 AstrBot 日志窗口保持开着**(便于回看 `pending registered` /
+   `user reply resolved` / `timeout after Ns` 等 info 日志)。
+5. **配置确认**:AstrBot WebUI → 插件管理 → `astrbot_plugin_ask_user` →
+   配置页应有两个字段:
+   - `enabled`(bool,默认 true)
+   - `timeout_seconds`(int,默认 300)
+
+### 场景 1:加载验证(代码层 ✅,需 AstrBot 启动无报错)
+
+**步骤**:
+1. 重启 AstrBot(或 WebUI 触发"重载插件")。
+2. 观察 AstrBot 主日志。
+
+**期望**:
+- 日志出现 `plugin loaded: astrbot_plugin_ask_user`(或类似 "added LLM tool: ask_user_choice" 的字样)
+- **无**任何 `Traceback` / `ImportError` / `KeyError`
+- 如果出现 `ModuleNotFoundError: No module named 'astrbot'`,那是
+  python 启动时 sys.path 缺 `F:\github\Astrbot`,跟本插件无关,
+  是 AstrBot 启动环境问题
+
+**回归点**:
+- `astbot` 报 v0.3.0 插件加载失败,先 `python -m py_compile` 4 个源文件
+
+### 场景 4:用户点击按钮
+
+**目的**:验证 `on_user_message` 钩子在"用户点击按钮"这条路径上
+正确 consume 消息,LLM 下一轮收到 `tool result = "<id>"`。
+
+**步骤**:
+1. 在 WebChat 私聊 AstrBot,发送:"请给我一个选项框让我选 A 或 B"
+2. 确认前端渲染 2 个按钮(选项 A、选项 B)+ 自由输入框
+3. 点击按钮 A
+4. 等待 LLM 下一轮回复
+
+**期望**:
+- LLM 下一轮说"你选了 A"或类似回应(基于 A 的 label / id)
+- AstrBot 日志出现两条 info:
+  ```
+  ask_user_choice: pending registered (umo=webchat:..., sender=..., pending_id=...)
+  ask_user_choice: user reply resolved (umo=webchat:..., sender=..., len=N)
+  ```
+- `pending_id` 两条日志**相同**
+- `len=N` 应是按钮 A 的 label 长度(或 id 长度,看前端回传哪个)
+- WebChat 不应再触发新一轮 LLM(`stop_event` 起效)
+
+**失败定位**:
+- 看到 `pending registered` 但没 `user reply resolved` → on_message 钩子没消费
+- 看到两条但 LLM 没收到 → 钩子消费了但 future 没 set_result
+- 看到 `KeyError: ...registry` → 大概率是 Chunk 2 命名漂移(用了 `_registry`)
+
+### 场景 6:用户不点按钮直接发普通消息(私聊)
+
+**目的**:验证"自由输入框的回执"路径;**与场景 4 不同的关键点**是
+用户没点按钮,直接键入文本。
+
+**步骤**:
+1. 新对话:"给我一个选项框"(确认前端渲染按钮)
+2. **不点按钮**,直接在输入框(自由输入框或普通输入框)键入 `banana` 并发送
+3. 等待 LLM 下一轮回复
+
+**期望**:
+- LLM 下一轮说"你输入了 banana"或类似回应
+- AstrBot 日志:
+  ```
+  ask_user_choice: pending registered (..., pending_id=abc123)
+  ask_user_choice: user reply resolved (..., len=6)
+  ```
+  (`len=6` = len("banana"))
+- 前端不会再触发一轮 LLM(`stop_event` 起效)
+
+**失败定位**:
+- `stop_event` 没生效:WebChat 会发两次 LLM 响应,一次回执
+  一次 user message;`agent_sub_stage` 跑两次。修复方向:确认
+  `on_user_message` 装饰器是 `@filter.platform_adapter_type(filter.PlatformAdapterType.ALL)`
+  且 stop_event 在 try_resolve 成功**之后**调用
+
+### 场景 7:群聊里非触发者发消息(隔离性)
+
+**目的**:验证"同 sender 隔离"——A 触发的工具不会被 B 的消息误消费。
+
+**步骤**:
+1. **私聊 A 账号** 与 AstrBot:"给我一个选项框",确认前端渲染按钮
+2. **切到 B 账号**(另一个 user)私聊 AstrBot,发"hello"
+3. 切回 A 账号,A 的工具**仍挂起**(没点没输入)
+4. A 账号**也不点**,等 5 秒看是否超时(默认 300 秒会等很久,可临时改 5)
+
+**期望**:
+- B 账号的 "hello" 走**正常 LLM 流程**——AstrBot 给 B 正常回复
+- A 账号的工具**仍挂起**(因为 A 没回),不会被 B 误消费
+- AstrBot 日志应**只有** A 触发时的 `pending registered`,**没有** B 的
+  `user reply resolved`(因为 B 的 key 不命中)
+- 如果想测超时:把 `timeout_seconds` 改 5,A 等 5 秒后工具返
+  `"Error: User did not respond within 5 seconds..."`,LLM 下一轮
+  走"未决定"逻辑
+
+**失败定位**:
+- B 触发了 A 的 resolve → key 隔离出问题,检查 `event.unified_msg_origin`
+  和 `event.get_sender_id()` 在 B 的 event 上是否真的是 B 的标识
+
+### 场景 9:`timeout_seconds = 5` 时故意不点
+
+**目的**:验证硬超时路径,5 秒后 LLM 收到错误信息能继续推理。
+
+**步骤**:
+1. WebUI → 插件管理 → `astrbot_plugin_ask_user` → 配置 → `timeout_seconds` 改为 `5`
+2. **重启 AstrBot**(配置必须重启才生效,hint 写明)
+3. 新对话:"给我一个选项框",确认前端渲染按钮
+4. **不点也不输入**,等 5 秒
+5. 观察 AstrBot 日志 + LLM 下一轮
+
+**期望**:
+- 5 秒后 AstrBot 日志:
+  ```
+  ask_user_choice: timeout after 5s (pending_id=...)
+  ```
+- LLM 下一轮收到 tool result = `"Error: User did not respond within 5 seconds. Please decide how to proceed (e.g., make a default choice, ask again, or skip)."`
+- LLM 据此继续推理(自主选默认值 / 跳过 / 重新问)
+- WebChat 不会有新一轮 LLM(`stop_event` 已起效,这条是工具内部超时)
+- 注册表里 key 已清空(`finally: registry._pending.pop(key, None)` 起效)
+
+**失败定位**:
+- 5 秒后**没有** timeout 日志 → `asyncio.wait_for` 没起作用,检查
+  `self.timeout_seconds < 0` 短路分支是否被错误命中
+- 超时了但 LLM 没收到错误 → 工具返了错但 LLM 链路断,看主日志有没有
+  agent 报错
+- 超时后下一次 LLM 调用立刻被"同 sender 已有 pending"挡掉 →
+  `finally` 块没清 dict
+
+### 场景全部通过后的回归点
+
+每次发版前**必跑**(spec §9.4):
+- 场景 1 (加载)
+- 场景 4 (点击按钮)
+- 场景 6 (自由输入)
+- 场景 7 (群聊隔离)
+- 场景 9 (超时)
+
+其他场景(spec §9.3 全部 12 个)在首次 v0.3.0 发布前补齐。
+
+### 失败排查决策树
+
+1. **`ModuleNotFoundError: No module named 'astrbot'`**
+   - 不是本插件问题;是 AstrBot 启动环境问题
+   - 确认 `python -m astrbot` 启动时 `F:\github\Astrbot` 在 sys.path
+2. **`plugin loaded` 看不到 / 日志有 ImportError**
+   - `python -m py_compile` 4 个源文件,看哪个编译失败
+   - 检查 Chunk 2 报告 §7 交接事项:`AskUserChoiceTool.registry`(无下划线)不是 `_registry`
+3. **工具被注册但 LLM 不调用**
+   - 检查 AstrBot 是否启用了 "tool calling" 能力(provider 决定)
+   - 直接对 LLM 说"给我一个选项框"测一次
+4. **LLM 调用了工具但 LLM 不等用户**
+   - 检查 `on_user_message` 装饰器
+   - 检查 `stop_event()` 调用的位置(必须在 `try_resolve` 成功之后)
+5. **前端不渲染选项框**
+   - 那是 WebChat 前端的 `unwrapInteractiveChoice` 问题(本插件的 JSON
+     格式沿用 v0.2.0,理论上 v0.2.0 装过的前端能正常解包)
+   - 用 F12 看 MessageChain 的 raw JSON,确认 `type: "interactive_choice"`
+
+### 附录生成时间
+
+- **生成者**:Chunk 5 Task 12 实施
+- **生成日期**:2026-06-29
+- **依据**:spec §9.3 + spec §9.4

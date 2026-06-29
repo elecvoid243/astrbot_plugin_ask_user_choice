@@ -3,10 +3,11 @@
 > 让 LLM 在需要人类审批/拍板时,通过 `ask_user_choice` 工具向用户呈现一个**可交互的选项框**。
 > 选项框在前端动态渲染,用户点击选项(或输入自定义文本)后,选择结果以纯文本 user message 回传 LLM。
 
-- **版本**: v0.2.0
+- **版本**: v0.3.0
 - **作者**: elecvoid243
 - **兼容**: AstrBot `>=4.16,<5`
 - **前置 spec**: [`docs/superpowers/specs/2026-06-28-dynamic-choice-box-rendering-design.md`](../../Astrbot/docs/superpowers/specs/2026-06-28-dynamic-choice-box-rendering-design.md)
+- **v0.3.0 spec**(阻塞式等待): [`docs/superpowers/specs/2026-06-29-ask-user-choice-suspension-design.md`](2026-06-29-ask-user-choice-suspension-design.md)
 
 ---
 
@@ -167,11 +168,12 @@ AstrBot WebChat 前端需 >= spec 日期的 dashboard 版本(支持 `interactive
 
 ## 配置
 
-插件支持 1 个配置项(在 AstrBot WebUI 的"插件配置"页面编辑,或直接修改 `data/plugin_data/astrbot_plugin_ask_user/config.json`):
+插件支持 2 个配置项(在 AstrBot WebUI 的"插件配置"页面编辑,或直接修改 `data/plugin_data/astrbot_plugin_ask_user/config.json`):
 
 | 字段 | 类型 | 默认 | 说明 |
 | ---- | :--: | :--: | ---- |
 | `enabled` | `bool` | `true` | 是否启用 `ask_user_choice` 工具。设为 `false` 后 AstrBot 启动时跳过工具注册,LLM 的工具列表里看不到该选项框功能。**修改后需重启 AstrBot 生效**。 |
+| `timeout_seconds` | `int` | `300` | 等待用户回复的超时秒数。`-1` 表示永久等待(必须用户回复或 AstrBot 重启才恢复);其他合法值 ≥ 1。**修改后需重启 AstrBot 生效**。 |
 
 ### 关闭后会发生什么
 

@@ -4,5 +4,12 @@
     "default": true,
     "description": "是否启用 ask_user_choice 工具",
     "hint": "修改后需重启生效"
+  },
+  "timeout_seconds": {
+    "type": "int",
+    "default": 300,
+    "description": "等待用户回复的超时秒数。-1 表示无限等待。",
+    "hint": "默认 300 秒(5 分钟);-1 等同于'必须等到用户回复才会继续'",
+    "min": -1
   }
 }

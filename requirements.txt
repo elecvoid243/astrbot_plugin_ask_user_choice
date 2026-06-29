@@ -1,0 +1,7 @@
+# Author: elecvoid243
+# Date: 2026-06-28
+#
+# 本插件仅依赖 AstrBot 运行时本身,无第三方包。
+# 保留 requirements.txt 文件是 AstrBot 插件脚手架的约定,以便用户清楚
+# 看到依赖关系(虽然目前为空)。
+astrbot>=4.16,<5

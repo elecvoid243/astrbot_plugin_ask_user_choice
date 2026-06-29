@@ -5,3 +5,7 @@
 # 保留 requirements.txt 文件是 AstrBot 插件脚手架的约定,以便用户清楚
 # 看到依赖关系(虽然目前为空)。
 astrbot>=4.16,<5
+
+# dev/test dependencies(运行时 AstrBot 自带 pytest 也可,这里写清楚便于独立跑测试)
+pytest>=7.0
+pytest-asyncio>=0.21

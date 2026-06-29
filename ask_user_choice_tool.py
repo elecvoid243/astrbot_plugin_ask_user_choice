@@ -113,7 +113,7 @@ class AskUserChoiceTool(FunctionTool):
         context: ContextWrapper,  # noqa: ARG002  # v1 保留,未来基于 persona 决策(spec §11.2 #1)
         **kwargs: Any,
     ) -> str:
-        """执行工具调用:校验参数 → 截断 → 拼装 InteractiveChoicePart JSON。
+        """执行工具调用:校验 → 推 UI → 阻塞等用户 → 返回回执文本。
 
         Args:
             context: AstrBot 运行上下文(``ContextWrapper``)。v1 暂未使用,
@@ -122,53 +122,52 @@ class AskUserChoiceTool(FunctionTool):
                 (必填) 与 ``title`` / ``input_placeholder`` (可选)。
 
         Returns:
-            spec §3.1 描述的 ``InteractiveChoicePart`` JSON 字符串;
-            参数非法时返回 ``"错误:..."`` 纯文本以便 LLM 自助重试
-            (spec §11.2 #2, 不抛异常以保留错误现场)。
+            成功:用户回执文本(LLM 据此继续推理)。
+            参数非法:`"Error: ..."` 纯文本以便 LLM 自助重试。
+            并发拒绝:`"Error: There is already an unanswered ..."`。
+            超时:`"Error: User did not respond within N seconds..."`。
+
+        Spec: docs/superpowers/specs/2026-06-29-ask-user-choice-suspension-design.md §5.1
         """
         prompt: str = (kwargs.get("prompt") or "").strip()
         options: list[dict[str, Any]] = kwargs.get("options") or []
         title: str | None = kwargs.get("title")
         input_placeholder: str | None = kwargs.get("input_placeholder")
 
-        # ① 软错误:参数不合法 → 返回"错误:..."纯文本,
-        #    让 LLM 看到错误信息并自行重试,避免工具异常打断整条链路
+        # ① 软错误:参数不合法 → 返 Error 文本,LLM 自助重试
         if not prompt:
             return "Error: prompt cannot be empty"
         if not isinstance(options, list) or not (
             _OPTIONS_MIN <= len(options) <= _OPTIONS_MAX
         ):
             return (
-                f"Error :options must be an array with {_OPTIONS_MIN}-{_OPTIONS_MAX} elements."
+                f"Error: options must be an array with {_OPTIONS_MIN}-{_OPTIONS_MAX} elements."
             )
 
-        # ② 逐项校验 option;遇到不合法项直接报错误(整体拒绝,不走部分)
+        # ② 逐项校验 option
         normalized_options: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
         for idx, opt in enumerate(options):
             if not isinstance(opt, dict):
-                return f"Error: options[{idx}] is not an object。"
+                return f"Error: options[{idx}] is not an object."
             oid = str(opt.get("id") or "").strip()
             label = str(opt.get("label") or "").strip()
             if not oid or not label:
                 return f"Error: options[{idx}] needs id/label"
             if oid in seen_ids:
-                return f"Error: There are duplicate IDs in the options: {oid!r}。"
+                return f"Error: Duplicate option id: {oid!r}."
             seen_ids.add(oid)
             normalized_options.append(
                 {
                     "id": oid,
-                    "label": label[:_LABEL_MAX],  # 截断,见 §3.2
-                    # 修正:`opt.get(key, default)` 只在 key 缺失时用 default;
-                    # 当 LLM 显式传 `null` 时会回 None,然后 str(None)="None"。
-                    # 这里改用 `or ""` 让 None/空字符串都归一为 ""。
+                    "label": label[:_LABEL_MAX],
                     "description": (
                         (opt.get("description") or "")[:_DESCRIPTION_MAX] or None
-                    )
+                    ),
                 }
             )
 
-        # ③ 构造 InteractiveChoicePart;None 字段清理掉(spec §11.2 #5)
+        # ③ 构造 InteractiveChoicePart
         payload: dict[str, Any] = {
             "type": "interactive_choice",
             "prompt": prompt[:_PROMPT_MAX],
@@ -180,10 +179,58 @@ class AskUserChoiceTool(FunctionTool):
             payload["input_placeholder"] = input_placeholder.strip()[
                 :_INPUT_PLACEHOLDER_MAX
             ]
+        json_str = json.dumps(payload, ensure_ascii=False)
 
-        # ④ 返回 JSON 字符串 — framework 走默认 Plain 包装,
-        #    前端 normalizePartsInternal 检测 "{" 开头 + type 字段后展平
-        return json.dumps(payload, ensure_ascii=False)
+        # ④ 推 UI 给用户(走 event.send,不入 LLM 上下文)
+        #    前端 unwrapInteractiveChoice 走"plain 内嵌 JSON"路径自动解包
+        #    spec §5.1 / §12 决策 7
+        event = context.context.event
+        await event.send(MessageChain([Plain(json_str)]))
+
+        # ⑤ 并发拒绝:同 sender 已有 pending → 返错误,不阻塞
+        #    spec 决策 6
+        #    注:has_pending + register 之间不能有 await(spec §4.3 注释)
+        key = (event.unified_msg_origin, event.get_sender_id())
+        if self.registry.has_pending(key):
+            return (
+                "Error: There is already an unanswered ask_user_choice "
+                "for this sender. Please wait for the user to respond "
+                "before asking again."
+            )
+
+        # ⑥ 注册 pending + 阻塞
+        fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        req = PendingRequest(
+            key=key,
+            future=fut,
+            prompt=prompt,
+            timeout_seconds=self.timeout_seconds,
+        )
+        self.registry.register(req)
+        logger.info(
+            f"ask_user_choice: pending registered "
+            f"(umo={event.unified_msg_origin}, sender={event.get_sender_id()}, "
+            f"pending_id={req.pending_id})"
+        )
+
+        try:
+            if self.timeout_seconds < 0:
+                # 永久等待;只有用户回复 / 插件 terminate / LLM abort 才会结束
+                return await fut
+            return await asyncio.wait_for(fut, timeout=self.timeout_seconds)
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"ask_user_choice: timeout after {self.timeout_seconds}s "
+                f"(pending_id={req.pending_id})"
+            )
+            return (
+                f"Error: User did not respond within {self.timeout_seconds} seconds. "
+                f"Please decide how to proceed (e.g., make a default choice, "
+                f"ask again, or skip)."
+            )
+        finally:
+            # try_resolve 时已 pop;此处防御 finally 路径(CancelledError 等)
+            self.registry._pending.pop(key, None)
 
 
 __all__ = ["AskUserChoiceTool"]

@@ -16,11 +16,16 @@ Date: 2026-06-28
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from astrbot.api import FunctionTool
+from astrbot.api import FunctionTool, logger
+from astrbot.api.message_components import Plain
+from astrbot.core.message.message_event_result import MessageChain
+
+from pending_registry import PendingRegistry, PendingRequest
 
 if TYPE_CHECKING:
     from astrbot.core.agent.run_context import ContextWrapper
@@ -40,6 +45,12 @@ _OPTIONS_MAX = 10
 @dataclass
 class AskUserChoiceTool(FunctionTool):
     name: str = "ask_user_choice"
+    timeout_seconds: int = 300
+    """等待用户回复的超时秒数。-1 表示无限等待。"""
+
+    registry: PendingRegistry = field(default_factory=PendingRegistry)
+    """挂起态注册表;每个 tool 实例一个,跨调用复用。"""
+
     description: str = (
         "Present an interactive option box to the user, where they click on one of the options. The tool will return a formatted JSON, which will be displayed as option box in the frontend."
         "Use it when 1) Requires user authorization for sensitive/irreversible operations; 2) Let users make a decision among multiple candidate solutions."

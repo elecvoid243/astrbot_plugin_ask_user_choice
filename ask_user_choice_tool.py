@@ -76,7 +76,8 @@ class AskUserChoiceTool(FunctionTool):
         "sensitive/irreversible actions, or (2) choosing among multiple "
         "candidate solutions. "
         "After calling this tool your turn is OVER: no more text, no more reasoning, no more tool calls."
-        "Do not infer anything from the return value (it is just a frontend rendering protocol). "
+        "Never infer anything from the return value (it is just a frontend rendering protocol). "
+        "One question at a time. Never call this tool multiple times in a row."
         "Wait for the user's choice to arrive as a regular user message in the next turn."
     )
 

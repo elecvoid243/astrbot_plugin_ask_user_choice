@@ -1,56 +1,75 @@
-"""astrbot_plugin_ask_user 插件入口。
+"""astrbot_plugin_ask_user_choice 插件入口 (v1.0 真阻塞式)。
 
-注册 :class:`AskUserChoiceTool` 到 AstrBot LLM 工具列表,使 LLM 能够在
-需要人类审批/选择时调用 ``ask_user_choice`` 工具输出结构化选项框。
+加载时:
+- 注册 :class:`AskUserChoiceTool` 到 AstrBot LLM 工具列表;
+- 把 :data:`interactive_choice_api.router` 挂到 dashboard FastAPI app。
+
+v1.0 相比 v0.3:完全删除软阻塞(system_prompt 注入 + 硬话术),改用真阻塞
+``await Future`` + 后端 REST 端点 resolve。
 
 完整规范:
-- 中间格式与字段约束: spec §3.1 / §3.2
-- 数据流与回传路径: spec §6
-- 工具定义: spec §11
-- 启停配置: docs/superpowers/specs/2026-06-28-toggle-config-design.md
-
-v0.3.0 新增(vs v0.2.0):
-- 硬话术 tool description:P1
-- 通过 ``@filter.on_llm_request()`` 钩子向 ``req.system_prompt``
-  末尾注入 ``ask_user_choice`` 使用规范:P2
-- 两者配合,放大 LLM "调完即停" 的概率。
-  不做真阻塞(p0 已由用户否决),所以是 "软阻塞" 方案。
+- 中间格式与字段约束:spec §3.1 / §5.1
+- 数据流:spec §3 / §4
+- 工具定义:spec §4.1
 
 Author: elecvoid243
-Date: 2026-06-28 (v0.1) / 2026-06-30 (v0.3)
+Date: 2026-07-03 (v1.0 重构)
 """
 
 from __future__ import annotations
 
 from astrbot.api import logger, star
-from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Star
 from astrbot.core.config import AstrBotConfig
 
 from .ask_user_choice_tool import AskUserChoiceTool
+from .interactive_choice_api import router as api_router
+from .interactive_choice_registry import registry
+
+
+def _mount_api_router() -> bool:
+    """把 :data:`api_router` 挂载到 dashboard FastAPI app。
+
+    Returns:
+        True if mount succeeded; False if dashboard 尚未初始化或挂载失败
+        (退化模式:工具仍可工作,只是前端无法手动提交选择)。
+
+    Implementation notes (Plan Amendment A):
+        AstrBot 的 :class:`FastAPIAppAdapter` 只暴露 Flask 风格的
+        ``add_url_rule``;本插件调用 ``include_router`` 时必须穿透到底层
+        FastAPI 实例(``APP._app``,私有 API)。这是 dashboard 内部挂载
+        ``build_api_router()`` 时用的同款手法,目前 AstrBot 没有公开的
+        ``add_api_router`` 等价方法。
+    """
+    try:
+        from astrbot.dashboard.server import APP
+
+        if APP is None:
+            logger.warning(
+                "ask_user_choice: dashboard APP 尚未初始化,REST 端点未挂载",
+            )
+            return False
+        underlying = getattr(APP, "_app", None)
+        if underlying is None:
+            logger.warning(
+                "ask_user_choice: dashboard APP 缺少 _app 属性,REST 端点未挂载",
+            )
+            return False
+        underlying.include_router(api_router)
+    except Exception as exc:  # noqa: BLE001 - 任何挂载异常都降级为 warn
+        logger.warning(f"ask_user_choice: REST 端点挂载失败 ({exc})")
+        return False
+    else:
+        logger.info("ask_user_choice: REST 端点已挂载到 dashboard app")
+        return True
 
 
 class AskUserChoicePlugin(Star):
-    """astrbot_plugin_ask_user 主类。
+    """astrbot_plugin_ask_user_choice 主类。
 
     加载时:
     - 把 :class:`AskUserChoiceTool` 注册为全局 LLM 工具;
-    - 通过 ``@filter.on_llm_request()`` 钩子在每次 LLM 请求前,
-      向 ``req.system_prompt`` 末尾注入 ask_user_choice 使用规范。
-
-    两者配合提高 LLM 在调用 ``ask_user_choice`` 后"自觉停下"的概率。
-
-    运行时配置:见 ``_conf_schema.json``,当前仅含 ``enabled`` 字段。
-    ``enabled=false`` 时:
-    - 不注册工具(LLM 看不到 ask_user_choice);
-    - 不注入策略(不污染系统提示词)。
-
-    注:
-        ``__init__`` 的 ``config`` 参数由 AstrBot 的
-        :class:`StarManager` 在实例化时通过 ``plugin_cls(context, config)``
-        传入(``astrbot/core/star/star_manager.py``)。不是所有 AstrBot
-        插件都接受 config——只有声明了 ``_conf_schema.json`` 的才有。
+    - 把交互端点 router 挂载到 dashboard app。
     """
 
     def __init__(self, context: star.Context, config: AstrBotConfig) -> None:
@@ -63,14 +82,16 @@ class AskUserChoicePlugin(Star):
 
         行为:
             - 读 ``self.config.get("enabled", True)``,关闭则 log + return。
-            - 启用则调 ``self.context.add_llm_tools``(复数)注册工具。
+            - 启用则:
+                1. 注册 ``AskUserChoiceTool``(复数 API,见
+                   ``astrbot/core/star/context.py``);
+                2. 挂载 ``api_router`` 到 dashboard app。
 
-        注:
-            - 使用 ``add_llm_tools``(复数) 是当前 AstrBot 的正确 API,
-              计划文档中拼写为单数形式 ``add_llm_tool``,但运行时仅
-              存在复数版本(``astrbot/core/star/context.py``)。
+        失败策略 (Plan Amendment E):
+            单一 try/except 包住整段挂载逻辑;挂载失败不回滚已注册的
+            工具——LLM 仍可调用 ``ask_user_choice``,仅前端无法手动提交
+            选择,降级为 warn 而非 raise。
         """
-        # 启停开关:bool() 防御性包裹,容忍配置写成 0/1 或 "true"/"false"
         enabled = bool(self.config.get("enabled", True))
         if not enabled:
             logger.info(
@@ -79,6 +100,12 @@ class AskUserChoicePlugin(Star):
             return
 
         self.context.add_llm_tools(AskUserChoiceTool())
+        _mount_api_router()
+
+    async def terminate(self) -> None:
+        """插件关闭:清空 Registry 中的所有 pending future。"""
+        await registry.shutdown()
+        logger.info("ask_user_choice: Registry 已关闭")
 
 
 __all__ = ["AskUserChoicePlugin"]

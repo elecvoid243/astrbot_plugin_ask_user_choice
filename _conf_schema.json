@@ -4,5 +4,22 @@
     "default": true,
     "description": "是否启用 ask_user_choice 工具",
     "hint": "修改后需重启生效"
+  },
+  "timeout_seconds": {
+    "type": "int",
+    "default": 300,
+    "description": "等待用户响应的超时秒数,默认 5 分钟(30-3600)",
+    "hint": "超过此秒数未响应则工具返回 timeout_fallback_message"
+  },
+  "timeout_fallback_message": {
+    "type": "string",
+    "default": "[User did not respond within {timeout} seconds. Please proceed with a reasonable default or inform the user that no response was received.]",
+    "description": "超时后工具返回给 LLM 的文本,{timeout} 会被替换为实际秒数"
+  },
+  "max_concurrent_pending": {
+    "type": "int",
+    "default": 32,
+    "description": "单 AstrBot 实例最大并发等待数,超过时工具返回错误",
+    "hint": "取值 >=1"
   }
 }

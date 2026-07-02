@@ -172,3 +172,92 @@ def test_post_double_call_returns_409(client):
         assert r.status_code == 409
     finally:
         registry.remove("rid-1")
+
+
+# ---------------------------------------------------------------------------
+# GET /api/chat/interactive-choice/pending?session_id=<umo>
+# ---------------------------------------------------------------------------
+
+
+def test_get_pending_400_when_missing_session_id(client):
+    # 缺 session_id 查询参数
+    r = client.get("/api/chat/interactive-choice/pending")
+    assert r.status_code == 400
+
+
+def test_get_pending_400_for_non_webchat_session(client):
+    # alice 登录,但 session_id 不是 webchat 格式
+    r = client.get(
+        "/api/chat/interactive-choice/pending",
+        params={"session_id": "lark:FriendMessage:lark!alice!sess"},
+    )
+    assert r.status_code == 400
+
+
+def test_get_pending_403_when_other_user(client):
+    # bob 登录,去查 alice 的 session
+    from starlette.responses import JSONResponse
+
+    from astrbot.dashboard.api.auth import require_dashboard_user
+    from astrbot.dashboard.responses import ApiError, error
+
+    app = FastAPI()
+    app.include_router(router)
+
+    @app.exception_handler(ApiError)
+    async def api_error_handler(_request, exc: ApiError):
+        return JSONResponse(error(exc.message), status_code=exc.status_code)
+
+    app.dependency_overrides[require_dashboard_user] = lambda: "bob"
+    c = TestClient(app)
+
+    alice_umo = "webchat:FriendMessage:webchat!alice!sess"
+    fut = asyncio.get_event_loop().create_future()
+    registry.add(
+        "rid-1",
+        alice_umo,
+        fut,
+        {"prompt": "x", "options": [{"id": "A", "label": "a"}]},
+        0.0,
+        time.time() + 60,
+    )
+    try:
+        r = c.get(
+            "/api/chat/interactive-choice/pending",
+            params={"session_id": alice_umo},
+        )
+        assert r.status_code == 403
+    finally:
+        registry.remove("rid-1")
+
+
+def test_get_pending_returns_alice_pending(client):
+    # alice 登录,查询自己 session 下的 pending
+    alice_umo = "webchat:FriendMessage:webchat!alice!sess"
+    fut = asyncio.get_event_loop().create_future()
+    spec = {
+        "prompt": "choose",
+        "options": [{"id": "A", "label": "alpha"}],
+    }
+    registry.add(
+        "rid-1",
+        alice_umo,
+        fut,
+        spec,
+        0.0,
+        time.time() + 60,
+    )
+    try:
+        r = client.get(
+            "/api/chat/interactive-choice/pending",
+            params={"session_id": alice_umo},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "ok"
+        items = body["data"]["pending"]
+        assert len(items) == 1
+        assert items[0]["request_id"] == "rid-1"
+        assert items[0]["spec"] == spec
+    finally:
+        registry.remove("rid-1")

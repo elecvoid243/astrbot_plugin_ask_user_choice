@@ -80,3 +80,36 @@ async def submit_interactive_choice(
         raise ApiError("Already resolved or expired", status_code=409)
 
     return ok({"request_id": request_id, "resolved_at": time.time()})
+
+
+@router.get("/api/chat/interactive-choice/pending")
+async def get_pending_choices(
+    session_id: str | None = None,
+    username: str = Depends(require_dashboard_user),
+):
+    """Return all pending choices for a given webchat UMO.
+
+    Used by the frontend on mount/reconnect to reconcile any choices the
+    user has not yet answered. Read-only; never mutates registry state.
+
+    Args:
+        session_id: Full UMO, e.g.
+            ``webchat:FriendMessage:webchat!alice!sess``.
+        username: Injected by ``require_dashboard_user``.
+
+    Returns:
+        200: ``{status: "ok", data: {pending: [...]}}``
+        400: Missing ``session_id`` or session_id is not a webchat UMO.
+        403: ``session_id`` belongs to a different dashboard user.
+    """
+    if not session_id or not session_id.strip():
+        raise ApiError("Missing query param: session_id", status_code=400)
+
+    expected = _extract_username_from_umo(session_id)
+    if not expected:
+        raise ApiError("session_id must be a webchat UMO", status_code=400)
+    if expected != username:
+        raise ApiError("Not authorized for this session", status_code=403)
+
+    items = registry.list_pending_for_umo(session_id)
+    return ok({"pending": items})

@@ -62,3 +62,38 @@ def test_remove_cancels_unfinished_future():
     )
     reg.remove("r1")
     assert fut.cancelled() or fut.done()
+
+
+def test_resolve_sets_future_result():
+    reg = InteractiveChoiceRegistry()
+    fut = _make_future()
+    reg.add("r1", "webchat:FriendMessage:webchat!alice!sess", fut,
+            {"prompt": "x", "options": [{"id": "A", "label": "a"}]}, 0.0, 100.0)
+    assert reg.resolve("r1", {"choice_id": "A", "free_text": ""}) is True
+    assert fut.result() == {"choice_id": "A", "free_text": ""}
+
+
+def test_resolve_unknown_returns_false():
+    reg = InteractiveChoiceRegistry()
+    assert reg.resolve("nonexistent", {"choice_id": "A"}) is False
+
+
+def test_resolve_double_call_protected():
+    reg = InteractiveChoiceRegistry()
+    fut = _make_future()
+    reg.add("r1", "webchat:FriendMessage:webchat!alice!sess", fut,
+            {"prompt": "x", "options": [{"id": "A", "label": "a"}]}, 0.0, 100.0)
+    assert reg.resolve("r1", {"choice_id": "A"}) is True
+    # 第二次 resolve 应返回 False(防双 resolve)
+    assert reg.resolve("r1", {"choice_id": "B"}) is False
+    # future 仍是第一次的结果
+    assert fut.result() == {"choice_id": "A"}
+
+
+def test_resolve_after_remove_returns_false():
+    reg = InteractiveChoiceRegistry()
+    fut = _make_future()
+    reg.add("r1", "webchat:FriendMessage:webchat!alice!sess", fut,
+            {"prompt": "x", "options": [{"id": "A", "label": "a"}]}, 0.0, 100.0)
+    reg.remove("r1")  # 移除后 future 被 cancel
+    assert reg.resolve("r1", {"choice_id": "A"}) is False

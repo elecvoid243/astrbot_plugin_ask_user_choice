@@ -70,6 +70,24 @@ class InteractiveChoiceRegistry:
         if not pending.future.done():
             pending.future.cancel()
 
+    def resolve(self, request_id: str, payload: dict) -> bool:
+        """Set future result。已 resolve 或不存在返回 False。
+
+        Args:
+            request_id: 由 add() 注册的 ID。
+            payload: 用户响应,通常是 {choice_id, free_text}。
+
+        Returns:
+            True if successful, False if unknown/already-done.
+        """
+        pending = self._pending.get(request_id)
+        if pending is None:
+            return False
+        if pending.future.done():
+            return False
+        pending.future.set_result(payload)
+        return True
+
 
 # 全局单例
 registry = InteractiveChoiceRegistry()

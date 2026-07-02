@@ -218,3 +218,47 @@ async def test_call_timeout_returns_fallback(monkeypatch):
     )
     assert "did not respond" in result
     assert len(registry._pending) == 0
+
+
+# ── _format_choice_for_llm 单元测试 (Task 7) ────────────────────────
+
+
+def test_format_choice_with_label_only():
+    tool = AskUserChoiceTool()
+    spec = {"options": [{"id": "A", "label": "alpha"}, {"id": "B", "label": "beta"}]}
+    result = tool._format_choice_for_llm({"choice_id": "A", "free_text": ""}, spec)
+    assert "alpha" in result
+    assert "id=A" in result
+    assert "Additional note" not in result
+
+
+def test_format_choice_with_free_text():
+    tool = AskUserChoiceTool()
+    spec = {"options": [{"id": "A", "label": "alpha"}, {"id": "B", "label": "beta"}]}
+    result = tool._format_choice_for_llm(
+        {"choice_id": "B", "free_text": "因为快"},
+        spec,
+    )
+    assert "beta" in result
+    assert "id=B" in result
+    assert "因为快" in result
+    assert "Additional note" in result
+
+
+def test_format_choice_with_free_text_only():
+    tool = AskUserChoiceTool()
+    spec = {"options": [{"id": "A", "label": "alpha"}, {"id": "B", "label": "beta"}]}
+    result = tool._format_choice_for_llm(
+        {"choice_id": "__free_text__", "free_text": "我选自己想的"},
+        spec,
+    )
+    assert "__free_text__" in result
+    assert "我选自己想的" in result
+
+
+def test_format_choice_unknown_id_falls_back_to_id():
+    tool = AskUserChoiceTool()
+    spec = {"options": [{"id": "A", "label": "alpha"}]}
+    result = tool._format_choice_for_llm({"choice_id": "Z", "free_text": ""}, spec)
+    # Z 不在 options 里,label fallback 到 choice_id
+    assert "Z" in result

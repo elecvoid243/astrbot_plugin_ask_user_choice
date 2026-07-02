@@ -328,24 +328,28 @@ class AskUserChoiceTool(FunctionTool):
             return {}
 
     def _format_choice_for_llm(self, user_choice: dict, spec: dict) -> str:
-        """格式化用户选择为 LLM 可见字符串。
-
-        Minimal placeholder for Task 6: produces the
-        ``"User selected: <label> (id=<id>)"`` string that ``call()`` needs
-        to surface to the LLM. Task 7 will replace this with full
-        free-text / unknown-id / validation handling.
+        """把用户响应格式化为 LLM 可见字符串。
 
         Args:
-            user_choice: 用户响应,通常是 ``{choice_id, free_text}``。
-            spec: _validate_and_build_spec 输出的 spec dict,用于查找 label。
+            user_choice: ``{choice_id, free_text}``;``choice_id`` 可为已知
+                option id、``"__free_text__"``(纯文本)或任意未知 id。
+            spec: _validate_and_build_spec 输出的 spec dict(含 ``options`` 列表)。
 
         Returns:
-            e.g. ``"User selected: alpha (id=A)"``。
+            ``"User selected: <label> (id=<id>)"``;
+            若 ``free_text`` 非空,附加一行 ``"\\nAdditional note: <free_text>"``。
+            ``label`` 优先取自 spec.options 中匹配的 label;若 id 不在 options
+            中或 spec 缺失,则 fallback 到 ``choice_id`` 本身。
         """
-        choice_id = str((user_choice or {}).get("choice_id") or "").strip()
+        choice_id = str((user_choice or {}).get("choice_id") or "")
+        free_text = str((user_choice or {}).get("free_text") or "").strip()
         label = choice_id
         for opt in spec.get("options") or []:
             if isinstance(opt, dict) and opt.get("id") == choice_id:
                 label = str(opt.get("label") or choice_id)
                 break
+        if free_text:
+            return (
+                f"User selected: {label} (id={choice_id})\nAdditional note: {free_text}"
+            )
         return f"User selected: {label} (id={choice_id})"

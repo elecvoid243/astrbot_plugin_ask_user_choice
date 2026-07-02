@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,33 @@ class InteractiveChoiceRegistry:
                 self._by_umo.pop(pending.umo, None)
         if not pending.future.done():
             pending.future.cancel()
+
+    def list_pending_for_umo(self, umo: str) -> list[dict]:
+        """列出某 umo 下所有仍 pending 的 choice。
+
+        Args:
+            umo: 统一消息来源,如 'webchat:FriendMessage:webchat!alice!sess'。
+
+        Returns:
+            [{request_id, spec, created_at, timeout_at}, ...]
+            排除已 resolve/已超时/已移除的条目。
+        """
+        ids = self._by_umo.get(umo, set())
+        now = time.time()
+        result = []
+        for rid in list(ids):
+            p = self._pending.get(rid)
+            if p is None or p.future.done() or p.timeout_at < now:
+                continue
+            result.append(
+                {
+                    "request_id": p.request_id,
+                    "spec": p.spec,
+                    "created_at": p.created_at,
+                    "timeout_at": p.timeout_at,
+                }
+            )
+        return result
 
     def resolve(self, request_id: str, payload: dict) -> bool:
         """Set future result。已 resolve 或不存在返回 False。

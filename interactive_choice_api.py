@@ -111,5 +111,11 @@ async def get_pending_choices(
     if expected != username:
         raise ApiError("Not authorized for this session", status_code=403)
 
-    items = registry.list_pending_for_umo(session_id)
-    return ok({"pending": items})
+    pending_list = registry.list_pending_for_umo(session_id)
+    parts = []
+    for item in pending_list:
+        spec = item["spec"].copy()
+        spec["request_id"] = item["request_id"]
+        spec["expires_at"] = item["timeout_at"]
+        parts.append(spec)
+    return ok({"pending": parts})

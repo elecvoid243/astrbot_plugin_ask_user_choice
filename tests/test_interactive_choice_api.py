@@ -232,32 +232,36 @@ def test_get_pending_403_when_other_user(client):
 
 
 def test_get_pending_returns_alice_pending(client):
-    # alice 登录,查询自己 session 下的 pending
-    alice_umo = "webchat:FriendMessage:webchat!alice!sess"
-    fut = asyncio.get_event_loop().create_future()
-    spec = {
-        "prompt": "choose",
-        "options": [{"id": "A", "label": "alpha"}],
-    }
+    fut1 = asyncio.get_event_loop().create_future()
+    fut2 = asyncio.get_event_loop().create_future()
     registry.add(
         "rid-1",
-        alice_umo,
-        fut,
-        spec,
+        "webchat:FriendMessage:webchat!alice!sess",
+        fut1,
+        {"prompt": "p1", "options": [{"id": "A", "label": "a"}]},
+        0.0,
+        time.time() + 60,
+    )
+    registry.add(
+        "rid-2",
+        "webchat:FriendMessage:webchat!bob!sess",
+        fut2,
+        {"prompt": "p2", "options": [{"id": "B", "label": "b"}]},
         0.0,
         time.time() + 60,
     )
     try:
         r = client.get(
-            "/api/chat/interactive-choice/pending",
-            params={"session_id": alice_umo},
+            "/api/chat/interactive-choice/pending?session_id=webchat:FriendMessage:webchat!alice!sess",
         )
         assert r.status_code == 200
         body = r.json()
         assert body["status"] == "ok"
-        items = body["data"]["pending"]
-        assert len(items) == 1
-        assert items[0]["request_id"] == "rid-1"
-        assert items[0]["spec"] == spec
+        pending = body["data"]["pending"]
+        assert len(pending) == 1
+        assert pending[0]["request_id"] == "rid-1"
+        assert pending[0]["prompt"] == "p1"
+        assert "expires_at" in pending[0]
     finally:
         registry.remove("rid-1")
+        registry.remove("rid-2")

@@ -1,0 +1,13 @@
+# Author: task4_fix
+# Date: 2026-07-02
+#
+# 开发依赖 (用于 pytest 测试套件)。
+# 运行插件本身只需要 astrbot (见 requirements.txt);
+# 以下包仅用于本地测试 / CI。
+#
+# Version policy: 使用 >= 锁大版本,允许补丁/小版本升级。
+# 这些版本由 Task 4 的 implementer 安装并验证可用。
+pytest>=9.1.1
+pytest-asyncio>=1.4.0
+pluggy>=1.6.0
+typing-extensions>=4.16.0

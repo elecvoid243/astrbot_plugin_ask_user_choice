@@ -125,7 +125,9 @@ class InteractiveChoiceRegistry:
 
     def _ensure_gc(self) -> None:
         """确保 GC task 在运行(单例一次)。"""
-        # 完整实现在 PR 2 集成阶段,这里占位避免破坏 add() 调用
+        # TODO(PR 2): Start _gc_loop as a background task here, store as self._gc_task.
+        # When filled in, update InteractiveChoiceRegistry.shutdown() to also
+        # cancel self._gc_task (currently only iterates _pending).
         pass
 
     async def _gc_loop(self) -> None:

@@ -1,37 +1,26 @@
-"""astrbot_plugin_ask_user/ask_user_choice_tool.py
+"""ask_user_choice 工具 (v1.0 真阻塞式)。
 
-ask_user_choice 工具:让 LLM 在需要人类审批/选择时输出结构化选项框。
-
-返回 JSON 字符串,由 WebChat 前端 ``useMessages.normalizePartsInternal``
-(参考 spec §2.3) 解包为 ``InteractiveChoicePart`` 并渲染。
-
-完整规范:
-- 中间格式字段约束: spec §3.2
-- 工具层校验/截断策略: spec §11.1
-- 错误处理 (降级为 unknown-part): spec §7
-- v0.3.0 软阻塞增强(P1+P2):AGENTS.md §4.3.1
-  - P1:本文件 ``description`` 字段改为硬话术(英文)
-  - P2:策略文本 + marker + build_injection_policy() 函数
-    由 ``main.py`` 通过 ``@filter.on_llm_request()`` 钩子注入 system_prompt
-
-Author: elecvoid243
-Date: 2026-06-28 (v0.1) / 2026-06-30 (v0.3)
+阻塞等待 dashboard 用户响应,完成后直接返回用户选择给 LLM。
 """
-
 from __future__ import annotations
 
+import asyncio
 import json
+import time
+import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from astrbot.api import FunctionTool
+from astrbot.core.utils.io import get_astrbot_data_path  # noqa: F401
+
+from .interactive_choice_registry import registry
 
 if TYPE_CHECKING:
     from astrbot.core.agent.run_context import ContextWrapper
 
 
-# ── 字段长度上限(spec §3.2 / §11.1 #4 双重截断) ────────────────
-# 工具层先截,前端后截——两层不冲突,工具层截断用于节省 token。
+# 字段长度上限
 _PROMPT_MAX = 200
 _TITLE_MAX = 30
 _LABEL_MAX = 30
@@ -41,177 +30,116 @@ _OPTIONS_MIN = 2
 _OPTIONS_MAX = 10
 
 
-INJECTION_MARKER = "# ask_user_choice tool policy"
-
-_SYSTEM_PROMPT_POLICY = (
-    "After calling `ask_user_choice`, your turn is OVER: "
-    "output no text, call no other tools, and wait for the user's response "
-    "(it arrives as a regular user message in the next turn). "
-    "The tool's return value is a frontend rendering protocol and carries no "
-    "information about the user's choice."
-)
-
-
-def build_injection_policy() -> str:
-    """构造待追加到 ``req.system_prompt`` 末尾的策略文本。
-
-    格式::
-
-        \\n\\n# ask_user_choice tool policy\\n\\n
-        <policy>
-
-    Returns:
-        含前导换行的完整注入块。``main.py`` 在空 system_prompt 时
-        用 ``.lstrip("\\n")`` 去掉前导换行,避免空 prompt 出现裸 \\n。
-    """
-    return f"\n\n{INJECTION_MARKER}\n\n{_SYSTEM_PROMPT_POLICY}"
-
-
 @dataclass
 class AskUserChoiceTool(FunctionTool):
+    """ask_user_choice 工具:阻塞式等待用户选择。"""
+
     name: str = "ask_user_choice"
     description: str = (
-        "Present an interactive option box so the user can pick one option "
-        "(or type a custom answer). Use it ONLY for: (1) authorizing "
-        "sensitive/irreversible actions, or (2) choosing among multiple "
-        "candidate solutions. "
-        "After calling this tool your turn is OVER: no more text, no more reasoning, no more tool calls."
-        "Never infer anything from the return value (it is just a frontend rendering protocol). "
-        "One question at a time. Never call this tool multiple times in a row."
-        "Wait for the user's choice to arrive as a regular user message in the next turn."
+        "Present the user with a question and a set of options to choose from. "
+        "Use this when you need the user to make a decision before you can proceed. "
+        "This tool blocks until the user responds, then returns their choice. "
+        "The user's response is returned directly as this tool's result."
     )
-
-    parameters: dict = field(
-        default_factory=lambda: {
-            "type": "object",
-            "properties": {
-                "prompt": {
-                    "type": "string",
-                    "description": (
-                        "Question text, displayed at the top of the option box, e.g. 'Please select the plan to apply next:'"
-                    ),
-                },
-                "options": {
-                    "type": "array",
-                    "minItems": _OPTIONS_MIN,
-                    "maxItems": _OPTIONS_MAX,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {
-                                "type": "string",
-                                "description": (
-                                    "The unique ID of the option. e.g. A/B/C or 1/2/3"
-                                ),
-                            },
-                            "label": {
-                                "type": "string",
-                                "description": "Text displayed on the button for brief description.",
-                            },
-                            "description": {
-                                "type": "string",
-                                "description": "Detailed description of options.",
-                            },
+    parameters: dict = field(default_factory=lambda: {
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": "Question displayed at the top of the option box",
+            },
+            "options": {
+                "type": "array",
+                "minItems": _OPTIONS_MIN,
+                "maxItems": _OPTIONS_MAX,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "Unique option ID (e.g. A/B/C)",
                         },
-                        "required": ["id", "label"],
+                        "label": {
+                            "type": "string",
+                            "description": "Button text",
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Optional detail",
+                        },
                     },
-                    "description": "2-10 options.",
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Optional option box titles, such as'Plan Selection'/'Operation Confirmation'",
-                },
-                "input_placeholder": {
-                    "type": "string",
-                    "description": (
-                        "Placeholder for free input box, for example: 'or enter the model name you want to use ..'"
-                    ),
+                    "required": ["id", "label"],
                 },
             },
-            "required": ["prompt", "options"],
-        }
-    )
+            "title": {
+                "type": "string",
+                "description": "Optional dialog title",
+            },
+            "input_placeholder": {
+                "type": "string",
+                "description": "Free-text input placeholder",
+            },
+        },
+        "required": ["prompt", "options"],
+    })
 
-    async def call(
-        self,
-        context: ContextWrapper,  # noqa: ARG002  # v1 保留,未来基于 persona 决策(spec §11.2 #1)
-        **kwargs: Any,
-    ) -> str:
-        """执行工具调用:校验参数 → 截断 → 拼装 InteractiveChoicePart JSON。
+    def _validate_and_build_spec(self, kwargs: dict) -> dict | str:
+        """校验参数 + 截断 + 构造 spec dict。
 
         Args:
-            context: AstrBot 运行上下文(``ContextWrapper``)。v1 暂未使用,
-                保留以备未来扩展(spec §11.2 #1)。
-            **kwargs: LLM 传入的工具参数,期望包含 ``prompt`` / ``options``
-                (必填) 与 ``title`` / ``input_placeholder`` (可选)。
+            kwargs: 工具调用参数。
 
         Returns:
-            spec §3.1 描述的 ``InteractiveChoicePart`` JSON 字符串;
-            参数非法时返回 ``"错误:..."`` 纯文本以便 LLM 自助重试
-            (spec §11.2 #2, 不抛异常以保留错误现场)。
+            校验通过返回 spec dict,失败返回错误字符串(供 LLM 自助重试)。
         """
-        prompt: str = (kwargs.get("prompt") or "").strip()
-        options: list[dict[str, Any]] = kwargs.get("options") or []
-        title: str | None = kwargs.get("title")
-        input_placeholder: str | None = kwargs.get("input_placeholder")
-
-        # ① 软错误:参数不合法 → 返回"错误:..."纯文本,
-        #    让 LLM 看到错误信息并自行重试,避免工具异常打断整条链路
+        prompt = (kwargs.get("prompt") or "").strip()
         if not prompt:
             return "Error: prompt cannot be empty"
+
+        options = kwargs.get("options") or []
         if not isinstance(options, list) or not (
             _OPTIONS_MIN <= len(options) <= _OPTIONS_MAX
         ):
             return (
-                f"Error :options must be an array with {_OPTIONS_MIN}-{_OPTIONS_MAX} elements."
+                f"Error: options must be an array with "
+                f"{_OPTIONS_MIN}-{_OPTIONS_MAX} elements."
             )
 
-        # ② 逐项校验 option;遇到不合法项直接报错误(整体拒绝,不走部分)
-        normalized_options: list[dict[str, Any]] = []
-        seen_ids: set[str] = set()
+        normalized = []
+        seen = set()
         for idx, opt in enumerate(options):
             if not isinstance(opt, dict):
-                return f"Error: options[{idx}] is not an object。"
+                return f"Error: options[{idx}] is not an object"
             oid = str(opt.get("id") or "").strip()
             label = str(opt.get("label") or "").strip()
             if not oid or not label:
                 return f"Error: options[{idx}] needs id/label"
-            if oid in seen_ids:
-                return f"Error: There are duplicate IDs in the options: {oid!r}。"
-            seen_ids.add(oid)
-            normalized_options.append(
-                {
-                    "id": oid,
-                    "label": label[:_LABEL_MAX],  # 截断,见 §3.2
-                    # 修正:`opt.get(key, default)` 只在 key 缺失时用 default;
-                    # 当 LLM 显式传 `null` 时会回 None,然后 str(None)="None"。
-                    # 这里改用 `or ""` 让 None/空字符串都归一为 ""。
-                    "description": (
-                        (opt.get("description") or "")[:_DESCRIPTION_MAX] or None
-                    )
-                }
-            )
+            if oid in seen:
+                return f"Error: duplicate option id: {oid!r}"
+            seen.add(oid)
+            normalized.append({
+                "id": oid,
+                "label": label[:_LABEL_MAX],
+                "description": (opt.get("description") or "")[:_DESCRIPTION_MAX] or None,
+            })
 
-        # ③ 构造 InteractiveChoicePart;None 字段清理掉(spec §11.2 #5)
-        payload: dict[str, Any] = {
+        spec: dict = {
             "type": "interactive_choice",
             "prompt": prompt[:_PROMPT_MAX],
-            "options": normalized_options,
+            "options": normalized,
         }
+        title = kwargs.get("title")
         if title and title.strip():
-            payload["title"] = title.strip()[:_TITLE_MAX]
-        if input_placeholder and input_placeholder.strip():
-            payload["input_placeholder"] = input_placeholder.strip()[
-                :_INPUT_PLACEHOLDER_MAX
-            ]
+            spec["title"] = title.strip()[:_TITLE_MAX]
+        placeholder = kwargs.get("input_placeholder")
+        if placeholder and placeholder.strip():
+            spec["input_placeholder"] = placeholder.strip()[:_INPUT_PLACEHOLDER_MAX]
+        return spec
 
-        # ④ 返回 JSON 字符串 — framework 走默认 Plain 包装,
-        #    前端 normalizePartsInternal 检测 "{" 开头 + type 字段后展平
-        return json.dumps(payload, ensure_ascii=False)
+    async def call(self, context: "ContextWrapper", **kwargs: Any) -> str:  # noqa: ARG002
+        """阻塞式实现 — 见 Task 6。"""
+        raise NotImplementedError("Implemented in Task 6")
 
-
-__all__ = [
-    "AskUserChoiceTool",
-    "INJECTION_MARKER",
-    "build_injection_policy",
-]
+    def _format_choice_for_llm(self, user_choice: dict, spec: dict) -> str:  # noqa: ARG002
+        """格式化用户选择为 LLM 可见字符串 — 见 Task 7。"""
+        raise NotImplementedError("Implemented in Task 7")

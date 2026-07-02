@@ -3,9 +3,19 @@
 挂在 dashboard app:POST /api/chat/interactive-choice/<request_id>
                   GET  /api/chat/interactive-choice/pending
 """
+
 from __future__ import annotations
 
+import time
+
+from fastapi import APIRouter, Depends, Request
+
+from astrbot.dashboard.api.auth import require_dashboard_user
+from astrbot.dashboard.responses import ApiError, ok
+
 from .interactive_choice_registry import registry
+
+router = APIRouter()
 
 
 def _extract_username_from_umo(umo: str) -> str:
@@ -26,4 +36,47 @@ def _extract_username_from_umo(umo: str) -> str:
     return ""
 
 
-# 端点实现见 Task 9, Task 10
+@router.post("/api/chat/interactive-choice/{request_id}")
+async def submit_interactive_choice(
+    request_id: str,
+    request: Request,
+    username: str = Depends(require_dashboard_user),
+):
+    """用户提交选择,resolve 对应 future。
+
+    Returns:
+        200: {status: "ok", data: {request_id, resolved_at}}
+        400: body 缺 choice_id
+        403: pending 属于其他用户
+        404: request_id 不存在或已超时
+        409: 已被 resolve(防双调用)
+    """
+    pending = registry._pending.get(request_id)
+    if pending is None:
+        raise ApiError("Interactive choice not found or expired", status_code=404)
+
+    # 鉴权层 2:UMO 归属
+    expected = _extract_username_from_umo(pending.umo)
+    if not expected or expected != username:
+        raise ApiError("Not authorized to resolve this choice", status_code=403)
+
+    # 解析 body
+    try:
+        body = await request.json()
+    except Exception:
+        raise ApiError("Invalid JSON body", status_code=400)
+    if not isinstance(body, dict):
+        raise ApiError("Body must be a JSON object", status_code=400)
+
+    choice_id = body.get("choice_id")
+    if not isinstance(choice_id, str) or not choice_id.strip():
+        raise ApiError("Missing key: choice_id", status_code=400)
+    free_text = body.get("free_text") or ""
+    if not isinstance(free_text, str):
+        free_text = ""
+
+    payload = {"choice_id": choice_id.strip(), "free_text": free_text.strip()}
+    if not registry.resolve(request_id, payload):
+        raise ApiError("Already resolved or expired", status_code=409)
+
+    return ok({"request_id": request_id, "resolved_at": time.time()})

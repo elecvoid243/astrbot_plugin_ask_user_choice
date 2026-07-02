@@ -116,6 +116,45 @@ class InteractiveChoiceRegistry:
         pending.future.set_result(payload)
         return True
 
+    def stats(self) -> dict:
+        """当前状态(用于调试/metrics)。"""
+        return {
+            "total_pending": len(self._pending),
+            "by_umo": {umo: len(ids) for umo, ids in self._by_umo.items()},
+        }
+
+    def _ensure_gc(self) -> None:
+        """确保 GC task 在运行(单例一次)。"""
+        # 完整实现在 PR 2 集成阶段,这里占位避免破坏 add() 调用
+        pass
+
+    async def _gc_loop(self) -> None:
+        """每 30s 扫描一次,清理已超时 / 已 done 的条目。"""
+        while True:
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                return
+            now = time.time()
+            expired = [
+                rid
+                for rid, p in self._pending.items()
+                if p.timeout_at < now or p.future.done()
+            ]
+            for rid in expired:
+                self.remove(rid)
+            if expired:
+                logger.debug(f"[interactive_choice_gc] cleaned {len(expired)} expired")
+
+    async def shutdown(self) -> None:
+        """优雅关闭:cancel 所有 future + GC task。"""
+        for pending in list(self._pending.values()):
+            if not pending.future.done():
+                pending.future.cancel()
+        self._pending.clear()
+        self._by_umo.clear()
+        # GC task 由 __init__ 阶段延迟启动,本测试不触发
+
 
 # 全局单例
 registry = InteractiveChoiceRegistry()

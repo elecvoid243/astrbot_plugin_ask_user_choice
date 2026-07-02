@@ -204,3 +204,29 @@ def test_list_pending_includes_spec_and_timestamps():
     assert item["spec"] == spec
     assert item["created_at"] == 10.0
     assert item["timeout_at"] == 110.0
+
+
+def test_stats_returns_counts():
+    reg = InteractiveChoiceRegistry()
+    fut = _make_future()
+    reg.add("r1", "webchat:FriendMessage:webchat!alice!sess", fut,
+            {"prompt": "x", "options": [{"id": "A", "label": "a"}]}, 0.0, 100.0)
+    stats = reg.stats()
+    assert stats["total_pending"] == 1
+    assert stats["by_umo"]["webchat:FriendMessage:webchat!alice!sess"] == 1
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_all_futures():
+    reg = InteractiveChoiceRegistry()
+    fut1 = _make_future()
+    fut2 = _make_future()
+    reg.add("r1", "webchat:FriendMessage:webchat!alice!sess", fut1,
+            {"prompt": "x", "options": [{"id": "A", "label": "a"}]}, 0.0, 100.0)
+    reg.add("r2", "webchat:FriendMessage:webchat!bob!sess", fut2,
+            {"prompt": "y", "options": [{"id": "B", "label": "b"}]}, 0.0, 100.0)
+    await reg.shutdown()
+    assert (fut1.cancelled() or fut1.done())
+    assert (fut2.cancelled() or fut2.done())
+    assert reg._pending == {}
+    assert reg._by_umo == {}

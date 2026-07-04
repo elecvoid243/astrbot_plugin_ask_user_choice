@@ -1,0 +1,821 @@
+# Review package: HEAD~1..HEAD
+
+## Commits
+4352cf371 refactor(frontend): rewrite parseInteractiveChoice for v1.0, add request_id
+
+## Files changed
+ .../message_list_comps/InteractiveChoiceBox.vue    |  22 +-
+ .../src/composables/parseInteractiveChoice.test.ts |  79 +++++
+ .../src/composables/parseInteractiveChoice.ts      | 151 +++-------
+ dashboard/src/composables/useMessages.ts           |  17 +-
+ dashboard/tests/parseInteractiveChoice.test.mjs    | 322 ---------------------
+ dashboard/tsconfig.json                            |   5 +-
+ 6 files changed, 151 insertions(+), 445 deletions(-)
+
+## Diff
+diff --git a/dashboard/src/components/chat/message_list_comps/InteractiveChoiceBox.vue b/dashboard/src/components/chat/message_list_comps/InteractiveChoiceBox.vue
+index d57d85496..22f3ee91f 100644
+--- a/dashboard/src/components/chat/message_list_comps/InteractiveChoiceBox.vue
++++ b/dashboard/src/components/chat/message_list_comps/InteractiveChoiceBox.vue
+@@ -34,21 +34,21 @@
+ 
+     <!-- Pending: 选项按钮 + 自由输入 -->
+     <template v-if="state === 'pending'">
+       <div class="choice-options">
+         <button
+           v-for="opt in part.options"
+           :key="opt.id"
+           type="button"
+           class="choice-option-button"
+           :aria-label="ariaLabelForOption(opt)"
+-          @click="onOptionClick(opt.value)"
++          @click="onOptionClick(opt)"
+         >
+           <span class="choice-option-label">{{ opt.label }}</span>
+           <span v-if="opt.description" class="choice-option-description">
+             {{ opt.description }}
+           </span>
+         </button>
+       </div>
+       <div class="choice-input-row">
+         <textarea
+           v-model="freeText"
+@@ -84,21 +84,25 @@
+         <span class="choice-result-label">{{ tm("interactiveChoice.alreadyInput") }}:</span>
+         <span class="choice-result-value">{{ submittedLabel }}</span>
+       </div>
+     </template>
+   </div>
+ </template>
+ 
+ <script setup lang="ts">
+ import { computed, ref } from "vue";
+ import { useModuleI18n } from "@/i18n/composables";
+-import type { InteractiveChoicePart, InteractiveChoiceOption } from "@/composables/parseInteractiveChoice";
++import {
++  getOptionSubmitText,
++  type InteractiveChoicePart,
++  type InteractiveChoiceOption,
++} from "@/composables/parseInteractiveChoice";
+ 
+ const props = defineProps<{
+   part: InteractiveChoicePart;
+   isDark?: boolean;
+   isIgnored?: boolean;
+ }>();
+ 
+ const emit = defineEmits<{
+   submit: [text: string];
+ }>();
+@@ -115,35 +119,39 @@ type State = "pending" | "submitted_via_option" | "submitted_via_input" | "ignor
+ 
+ const state = computed<State>(() => {
+   if (props.isIgnored && submittedValue.value === null) return "ignored";
+   if (submittedValue.value === null) return "pending";
+   return submittedKind.value === "option" ? "submitted_via_option" : "submitted_via_input";
+ });
+ 
+ const submittedLabel = computed(() => {
+   if (submittedValue.value === null) return "";
+   if (submittedKind.value === "option") {
+-    const opt = props.part.options.find((o) => o.value === submittedValue.value);
+-    return opt?.label ?? submittedValue.value;
++    const opt = props.part.options.find((o) => o.id === submittedOptionId.value);
++    if (opt) return getOptionSubmitText(opt);
++    return submittedValue.value;
+   }
+   return submittedValue.value;
+ });
+ 
++const submittedOptionId = ref<string | null>(null);
++
+ const inputPlaceholderResolved = computed(
+   () => props.part.input_placeholder || tm("interactiveChoice.defaultPlaceholder"),
+ );
+ 
+-function onOptionClick(value: string) {
++function onOptionClick(opt: InteractiveChoiceOption) {
+   if (state.value !== "pending") return;
+-  submittedValue.value = value;
++  submittedOptionId.value = opt.id;
++  submittedValue.value = getOptionSubmitText(opt);
+   submittedKind.value = "option";
+-  emit("submit", value);
++  emit("submit", submittedValue.value);
+ }
+ 
+ function onInputSubmit() {
+   const text = freeText.value.trim();
+   if (!text || state.value !== "pending") return;
+   submittedValue.value = text;
+   submittedKind.value = "input";
+   emit("submit", text);
+ }
+ 
+diff --git a/dashboard/src/composables/parseInteractiveChoice.test.ts b/dashboard/src/composables/parseInteractiveChoice.test.ts
+new file mode 100644
+index 000000000..5595fdd95
+--- /dev/null
++++ b/dashboard/src/composables/parseInteractiveChoice.test.ts
+@@ -0,0 +1,79 @@
++// Author: elecvoid243 (task12_impl)
++// Date: 2026-07-03
++// Spec: docs/superpowers/specs/2026-07-02-blocking-interactive-choice-design.md §5.1
++//
++// Test runner: node --test (Node v24 strips TS from .ts imports automatically).
++// Run: cd dashboard && pnpm exec node --test --import tsx src/composables/parseInteractiveChoice.test.ts
++import assert from "node:assert/strict";
++import { test } from "node:test";
++
++import {
++  isInteractiveChoicePayload,
++  validateInteractiveChoice,
++  truncateInteractiveChoice,
++  getOptionSubmitText,
++} from "./parseInteractiveChoice.ts";
++
++test("isInteractiveChoicePayload accepts valid type", () => {
++  assert.equal(isInteractiveChoicePayload({ type: "interactive_choice" }), true);
++});
++
++test("isInteractiveChoicePayload rejects null", () => {
++  assert.equal(isInteractiveChoicePayload(null), false);
++});
++
++test("validateInteractiveChoice accepts request_id", () => {
++  const valid = {
++    type: "interactive_choice",
++    request_id: "r1",
++    prompt: "test",
++    options: [{ id: "A", label: "a" }, { id: "B", label: "b" }],
++  };
++  assert.equal(validateInteractiveChoice(valid), true);
++});
++
++test("validateInteractiveChoice rejects missing request_id", () => {
++  const invalid = {
++    type: "interactive_choice",
++    prompt: "test",
++    options: [{ id: "A", label: "a" }, { id: "B", label: "b" }],
++  };
++  assert.equal(validateInteractiveChoice(invalid), false);
++});
++
++test("validateInteractiveChoice rejects empty request_id", () => {
++  const invalid = {
++    type: "interactive_choice",
++    request_id: "  ",
++    prompt: "test",
++    options: [{ id: "A", label: "a" }, { id: "B", label: "b" }],
++  };
++  assert.equal(validateInteractiveChoice(invalid), false);
++});
++
++test("validateInteractiveChoice rejects duplicate option ids", () => {
++  const invalid = {
++    type: "interactive_choice",
++    request_id: "r1",
++    prompt: "test",
++    options: [{ id: "A", label: "a" }, { id: "A", label: "b" }],
++  };
++  assert.equal(validateInteractiveChoice(invalid), false);
++});
++
++test("truncateInteractiveChoice preserves request_id", () => {
++  const input = {
++    type: "interactive_choice" as const,
++    request_id: "r1",
++    prompt: "x".repeat(300),
++    options: [{ id: "A", label: "a" }],
++  };
++  const out = truncateInteractiveChoice(input);
++  assert.equal(out.request_id, "r1");
++  assert.equal(out.prompt.length, 200);
++});
++
++test("getOptionSubmitText returns id+label when no value", () => {
++  const opt = { id: "A", label: "alpha" };
++  assert.equal(getOptionSubmitText(opt), "A. alpha");
++});
+diff --git a/dashboard/src/composables/parseInteractiveChoice.ts b/dashboard/src/composables/parseInteractiveChoice.ts
+index ab3faf521..ae8d7b98a 100644
+--- a/dashboard/src/composables/parseInteractiveChoice.ts
++++ b/dashboard/src/composables/parseInteractiveChoice.ts
+@@ -1,156 +1,95 @@
+ // Author: elecvoid243
+-// Date: 2026-06-28
+-// Spec: docs/superpowers/specs/2026-06-28-dynamic-choice-box-rendering-design.md §2.3 / §3.2 / §7
++// Date: 2026-07-02
++// Spec: docs/superpowers/specs/2026-07-02-blocking-interactive-choice-design.md §5.1
+ //
+-// 纯函数模块:把"工具返回 JSON → 前端 InteractiveChoicePart"的翻译逻辑全部内聚到这里,
+-// 不依赖 Vue / pinia / axios,确保可被 node --test 独立单测。
+-// 镜像既有 parseSpcodeFileRestore.ts + useSpcodeFileRestore.ts 同构模式。
++// 纯函数模块:校验 + 截断 InteractiveChoicePart。v1.0 走 SSE 顶层 type,
++// 不再解 plain 文本/拆 tool_call,删除相关辅助函数。
+ 
+-// ─── 类型定义 ─────────────────────────────────────────────────
+-
+-/** InteractiveChoicePart 的最小类型。完整字段见 spec §3.1。 */
+ export interface InteractiveChoiceOption {
+   id: string;
+   label: string;
+   description?: string;
+-  value: string;
++  /** 旧 plugin 字段(v0.3),新代码忽略 */
++  value?: string;
+ }
+ 
+ export interface InteractiveChoicePart {
+   type: "interactive_choice";
++  /** v1.0 必填:后端生成的 request_id,提交时用作路由 */
++  request_id: string;
+   prompt: string;
+   title?: string;
+   options: InteractiveChoiceOption[];
+   input_placeholder?: string;
++  /** v1.0 可选:unix ts,前端可显示倒计时 */
++  expires_at?: number;
+   [key: string]: unknown;
+ }
+ 
+-/** 任意 MessagePart 的最小契约(避免 import useMessages 引起循环依赖) */
+-export interface MaybePlainPart {
+-  type?: string;
+-  text?: string;
+-  [key: string]: unknown;
+-}
+-
+-// ─── 解包:判断 payload 是否是 InteractiveChoicePart ───────────
+-
+-/**
+- * 检查某个对象是否是合法的 InteractiveChoicePart 形态。
+- * 仅做"类型字段存在性"判断,**不**做字段校验(校验见 validateInteractiveChoice)。
+- */
+ export function isInteractiveChoicePayload(value: unknown): value is InteractiveChoicePart {
+   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+   const obj = value as Record<string, unknown>;
+   return obj.type === "interactive_choice";
+ }
+ 
+-// ─── 解包:plain 文本 → InteractiveChoicePart ────────────────
+-
+-/**
+- * 把 MessagePart 数组中的某一项尽可能解包成 InteractiveChoicePart。
+- *
+- * 规则(spec §2.3 / §7):
+- * - 原生 `type === "interactive_choice"` → 透传
+- * - `type === "plain"` 且 text 以 "{" 开头 → JSON.parse,成功且结果是 InteractiveChoicePart → 替换
+- * - 其他(普通文本、图片、工具调用等) → 原样返回,不重写
+- * - JSON.parse 失败 → **保留原 plain 文本**(不降级为 unknown-part,避免误吃文本,spec §7)
+- */
+-export function unwrapInteractiveChoice<T extends MaybePlainPart>(part: T): T | InteractiveChoicePart {
+-  if (part.type === "interactive_choice") {
+-    return part as unknown as InteractiveChoicePart;
+-  }
+-  if (part.type === "plain" && typeof part.text === "string" && part.text.startsWith("{")) {
+-    let parsed: unknown;
+-    try {
+-      parsed = JSON.parse(part.text);
+-    } catch {
+-      // 解析失败(spec §7):保留原 plain 文本,不重写
+-      return part;
+-    }
+-    if (isInteractiveChoicePayload(parsed)) {
+-      return parsed;
+-    }
+-  }
+-  return part;
+-}
+-
+-// ─── 校验:字段是否满足 spec §3.2 约束 ────────────────────────
+-
+-/**
+- * 校验 InteractiveChoicePart 的字段是否满足 spec §3.2 约束。
+- * 失败时返回 false(spec §2.3 步骤 2:非法则降级为 unknown-part)。
+- */
+ export function validateInteractiveChoice(obj: unknown): boolean {
+   if (!isInteractiveChoicePayload(obj)) return false;
+-
+   const part = obj as Record<string, unknown>;
+-  const prompt = part.prompt;
+-  if (typeof prompt !== "string" || !prompt.trim()) return false;
+-
+-  const options = part.options;
+-  if (!Array.isArray(options) || options.length < 2) return false;
+-
+-  const seenIds = new Set<string>();
+-  for (const opt of options) {
++  if (typeof part.request_id !== "string" || !part.request_id.trim()) return false;
++  if (typeof part.prompt !== "string" || !part.prompt.trim()) return false;
++  if (!Array.isArray(part.options) || part.options.length < 2) return false;
++  const seen = new Set<string>();
++  for (const opt of part.options) {
+     if (!opt || typeof opt !== "object") return false;
+     const o = opt as Record<string, unknown>;
+-    const id = o.id;
+-    const label = o.label;
+-    const value = o.value;
+-    if (typeof id !== "string" || !id.trim()) return false;
+-    if (typeof label !== "string" || !label.trim()) return false;
+-    if (typeof value !== "string") return false;
+-    if (seenIds.has(id)) return false;
+-    seenIds.add(id);
++    if (typeof o.id !== "string" || !o.id.trim()) return false;
++    if (typeof o.label !== "string" || !o.label.trim()) return false;
++    if (seen.has(o.id)) return false;
++    seen.add(o.id);
+   }
+   return true;
+ }
+ 
+-// ─── 截断:防御性兜底,工具层已截但前端再截一次(spec §3.2 footnote) ─
+-
+-/**
+- * 截断超长字段(spec §3.2 长度上限 + 末尾 footnote 双重截断策略)。
+- * 不可变:未发生截断时返回原对象(优化 + 便于测试 deepEqual)。
+- */
+ export function truncateInteractiveChoice(part: InteractiveChoicePart): InteractiveChoicePart {
+-  const PROMPT_MAX = 200;
+-  const TITLE_MAX = 30;
+-  const LABEL_MAX = 30;
+-  const DESC_MAX = 200;
+-  const PLACEHOLDER_MAX = 60;
+-
++  const LIMITS = { PROMPT_MAX: 200, TITLE_MAX: 30, LABEL_MAX: 30, DESC_MAX: 200, PLACEHOLDER_MAX: 60 };
+   let mutated = false;
+   const out: InteractiveChoicePart = { ...part };
+-
+-  if (out.prompt.length > PROMPT_MAX) {
+-    out.prompt = out.prompt.slice(0, PROMPT_MAX);
++  if (out.prompt.length > LIMITS.PROMPT_MAX) {
++    out.prompt = out.prompt.slice(0, LIMITS.PROMPT_MAX);
+     mutated = true;
+   }
+-  if (typeof out.title === "string" && out.title.length > TITLE_MAX) {
+-    out.title = out.title.slice(0, TITLE_MAX);
++  if (typeof out.title === "string" && out.title.length > LIMITS.TITLE_MAX) {
++    out.title = out.title.slice(0, LIMITS.TITLE_MAX);
+     mutated = true;
+   }
+-  if (typeof out.input_placeholder === "string" && out.input_placeholder.length > PLACEHOLDER_MAX) {
+-    out.input_placeholder = out.input_placeholder.slice(0, PLACEHOLDER_MAX);
++  if (typeof out.input_placeholder === "string" && out.input_placeholder.length > LIMITS.PLACEHOLDER_MAX) {
++    out.input_placeholder = out.input_placeholder.slice(0, LIMITS.PLACEHOLDER_MAX);
+     mutated = true;
+   }
+   if (Array.isArray(out.options)) {
+-    const newOptions: InteractiveChoiceOption[] = [];
++    const newOpts: InteractiveChoiceOption[] = [];
+     for (const opt of out.options) {
+-      let optMutated = false;
+       const o: InteractiveChoiceOption = { ...opt };
+-      if (o.label.length > LABEL_MAX) {
+-        o.label = o.label.slice(0, LABEL_MAX);
+-        optMutated = true;
++      if (o.label.length > LIMITS.LABEL_MAX) {
++        o.label = o.label.slice(0, LIMITS.LABEL_MAX);
++        mutated = true;
+       }
+-      if (typeof o.description === "string" && o.description.length > DESC_MAX) {
+-        o.description = o.description.slice(0, DESC_MAX);
+-        optMutated = true;
++      if (typeof o.description === "string" && o.description.length > LIMITS.DESC_MAX) {
++        o.description = o.description.slice(0, LIMITS.DESC_MAX);
++        mutated = true;
+       }
+-      newOptions.push(o);
+-      if (optMutated) mutated = true;
++      newOpts.push(o);
+     }
+-    out.options = newOptions;
++    out.options = newOpts;
+   }
+   return mutated ? out : part;
+-}
+\ No newline at end of file
++}
++
++export function getOptionSubmitText(opt: InteractiveChoiceOption): string {
++  if (typeof opt.value === "string" && opt.value.length > 0) return opt.value;
++  const id = typeof opt.id === "string" ? opt.id : "";
++  const label = typeof opt.label === "string" ? opt.label : "";
++  if (id && label) return `${id}. ${label}`;
++  if (label) return label;
++  return id;
++}
+diff --git a/dashboard/src/composables/useMessages.ts b/dashboard/src/composables/useMessages.ts
+index 195dc129a..7d13e036b 100644
+--- a/dashboard/src/composables/useMessages.ts
++++ b/dashboard/src/composables/useMessages.ts
+@@ -1,16 +1,15 @@
+ import { computed, onBeforeUnmount, reactive, ref, type Ref } from "vue";
+ import { chatApi, fileApi } from "@/api/v1";
+ import { fetchWithAuth } from "@/api/http";
+ import {
+   isInteractiveChoicePayload,
+-  unwrapInteractiveChoice,
+   validateInteractiveChoice,
+   truncateInteractiveChoice,
+ } from "./parseInteractiveChoice";
+ 
+ export type TransportMode = "sse" | "websocket";
+ 
+ export interface MessagePart {
+   type: string;
+   text?: string;
+   think?: string;
+@@ -1312,29 +1311,29 @@ function normalizePartsInternal(parts: unknown): MessagePart[] {
+     if (!part || typeof part !== "object") {
+       return { type: "plain", text: String(part ?? "") };
+     }
+     if (part.type === "reasoning") {
+       return {
+         ...part,
+         type: "think",
+         think: String(part.think ?? part.text ?? ""),
+       };
+     }
+-    // ① 解包(plain 文本内嵌 JSON / 透传原生 interactive_choice)
+-    const unwrapped = unwrapInteractiveChoice(part);
+-    // ② 如果解包后是 InteractiveChoicePart,走校验 + 截断
+-    if (isInteractiveChoicePayload(unwrapped)) {
+-      if (!validateInteractiveChoice(unwrapped)) {
+-        // 非法(spec §2.3 步骤 2):降级为 unknown-part
+-        return { type: "plain", text: JSON.stringify(unwrapped) };
++    // ① v1.0 schema:InteractiveChoicePart 已通过 SSE 顶层 type 到达,
++    //    不再解 plain 文本/拆 tool_call(见 parseInteractiveChoice 模块注释)。
++    // ② 校验 + 截断(防御性兜底,后端已截过一遍)
++    if (isInteractiveChoicePayload(part)) {
++      if (!validateInteractiveChoice(part)) {
++        // 非法:降级为 plain JSON(spec §2.3 步骤 2),与 v0.3 行为一致
++        return { type: "plain", text: JSON.stringify(part) };
+       }
+-      return truncateInteractiveChoice(unwrapped);
++      return truncateInteractiveChoice(part);
+     }
+     return { ...part };
+   });
+ }
+ 
+ function isEmptyPlainPart(part: MessagePart) {
+   return part.type === "plain" && !String(part.text || "");
+ }
+ 
+ function isThinkingPart(part: MessagePart) {
+diff --git a/dashboard/tests/parseInteractiveChoice.test.mjs b/dashboard/tests/parseInteractiveChoice.test.mjs
+deleted file mode 100644
+index f8e7137a9..000000000
+--- a/dashboard/tests/parseInteractiveChoice.test.mjs
++++ /dev/null
+@@ -1,322 +0,0 @@
+-// Author: elecvoid243
+-// Date: 2026-06-28
+-// Spec: docs/superpowers/specs/2026-06-28-dynamic-choice-box-rendering-design.md §2.3 / §3.2 / §7
+-//
+-// 测试 parseInteractiveChoice.ts 的纯函数:解包(unwrap) + 校验(validate) + 截断(truncate)。
+-// 覆盖 spec §3.2 字段约束、§7 错误处理。
+-import assert from "node:assert/strict";
+-import test from "node:test";
+-
+-import {
+-  isInteractiveChoicePayload,
+-  unwrapInteractiveChoice,
+-  validateInteractiveChoice,
+-  truncateInteractiveChoice,
+-} from "../src/composables/parseInteractiveChoice.ts";
+-
+-// ─── 公共 fixture ─────────────────────────────────────────────
+-const validOption = { id: "a", label: "GPT-4", description: "更强但更慢", value: "gpt-4" };
+-const validPart = {
+-  type: "interactive_choice",
+-  prompt: "请选择下一步使用的模型:",
+-  options: [validOption, { id: "b", label: "GPT-4 mini", value: "gpt-4-mini" }],
+-};
+-
+-// ─── isInteractiveChoicePayload ──────────────────────────────
+-test("isInteractiveChoicePayload: 合法 InteractiveChoicePart 返回 true", () => {
+-  assert.equal(isInteractiveChoicePayload(validPart), true);
+-});
+-
+-test("isInteractiveChoicePayload: 缺 type 字段返回 false", () => {
+-  assert.equal(isInteractiveChoicePayload({ prompt: "x", options: [validOption] }), false);
+-});
+-
+-test("isInteractiveChoicePayload: type 不是 interactive_choice 返回 false", () => {
+-  assert.equal(isInteractiveChoicePayload({ type: "plain", text: "hi" }), false);
+-  assert.equal(isInteractiveChoicePayload({ type: "tool_call" }), false);
+-});
+-
+-test("isInteractiveChoicePayload: 非对象(null / string / array)返回 false", () => {
+-  assert.equal(isInteractiveChoicePayload(null), false);
+-  assert.equal(isInteractiveChoicePayload("string"), false);
+-  assert.equal(isInteractiveChoicePayload([1, 2]), false);
+-});
+-
+-// ─── unwrapInteractiveChoice ──────────────────────────────────
+-test("unwrapInteractiveChoice: plain + JSON 字符串前缀 { 解包为 InteractiveChoicePart", () => {
+-  const part = { type: "plain", text: JSON.stringify(validPart) };
+-  const result = unwrapInteractiveChoice(part);
+-  assert.deepEqual(result, validPart);
+-});
+-
+-test("unwrapInteractiveChoice: 原生 interactive_choice part 透传", () => {
+-  const result = unwrapInteractiveChoice(validPart);
+-  assert.deepEqual(result, validPart);
+-});
+-
+-test("unwrapInteractiveChoice: 普通 plain 文本不改动", () => {
+-  const part = { type: "plain", text: "hello world" };
+-  assert.deepEqual(unwrapInteractiveChoice(part), part);
+-});
+-
+-test("unwrapInteractiveChoice: plain 但 JSON.parse 失败保留原 part(见 spec §7)", () => {
+-  const part = { type: "plain", text: '{ "type": "interactive_choice", "broken' };
+-  assert.deepEqual(unwrapInteractiveChoice(part), part);
+-});
+-
+-test("unwrapInteractiveChoice: plain 但解析后 type 不是 interactive_choice 保留原 part", () => {
+-  const part = { type: "plain", text: '{"type":"other","foo":1}' };
+-  assert.deepEqual(unwrapInteractiveChoice(part), part);
+-});
+-
+-test("unwrapInteractiveChoice: plain 但 text 不以 { 开头保留原 part", () => {
+-  const part = { type: "plain", text: "not json" };
+-  assert.deepEqual(unwrapInteractiveChoice(part), part);
+-});
+-
+-test("unwrapInteractiveChoice: 非 plain / 非 interactive_choice 原样返回(图片等不重写)", () => {
+-  const imagePart = { type: "image", url: "http://x" };
+-  assert.deepEqual(unwrapInteractiveChoice(imagePart), imagePart);
+-});
+-
+-// ─── validateInteractiveChoice ────────────────────────────────
+-test("validateInteractiveChoice: 合法 part 返回 true", () => {
+-  assert.equal(validateInteractiveChoice(validPart), true);
+-});
+-
+-test("validateInteractiveChoice: 缺 prompt 返回 false", () => {
+-  assert.equal(validateInteractiveChoice({ type: "interactive_choice", options: [validOption] }), false);
+-});
+-
+-test("validateInteractiveChoice: prompt 为空字符串返回 false", () => {
+-  assert.equal(validateInteractiveChoice({ type: "interactive_choice", prompt: "", options: [validOption] }), false);
+-});
+-
+-test("validateInteractiveChoice: 缺 options 返回 false", () => {
+-  assert.equal(validateInteractiveChoice({ type: "interactive_choice", prompt: "x" }), false);
+-});
+-
+-test("validateInteractiveChoice: options 只有一个元素返回 false(spec §3.2 至少 2 个)", () => {
+-  assert.equal(
+-    validateInteractiveChoice({ type: "interactive_choice", prompt: "x", options: [validOption] }),
+-    false,
+-  );
+-});
+-
+-test("validateInteractiveChoice: options 元素缺 id 返回 false", () => {
+-  const bad = { type: "interactive_choice", prompt: "x", options: [{ label: "x", value: "y" }] };
+-  assert.equal(validateInteractiveChoice(bad), false);
+-});
+-
+-test("validateInteractiveChoice: options 元素缺 label 返回 false", () => {
+-  const bad = { type: "interactive_choice", prompt: "x", options: [{ id: "a", value: "y" }] };
+-  assert.equal(validateInteractiveChoice(bad), false);
+-});
+-
+-test("validateInteractiveChoice: options 元素缺 value 返回 false", () => {
+-  const bad = { type: "interactive_choice", prompt: "x", options: [{ id: "a", label: "y" }] };
+-  assert.equal(validateInteractiveChoice(bad), false);
+-});
+-
+-test("validateInteractiveChoice: id 重复返回 false(spec §3.2)", () => {
+-  const bad = {
+-    type: "interactive_choice",
+-    prompt: "x",
+-    options: [
+-      { id: "a", label: "A", value: "1" },
+-      { id: "a", label: "B", value: "2" },
+-    ],
+-  };
+-  assert.equal(validateInteractiveChoice(bad), false);
+-});
+-
+-test("validateInteractiveChoice: id 为空字符串返回 false", () => {
+-  const bad = {
+-    type: "interactive_choice",
+-    prompt: "x",
+-    options: [
+-      { id: "", label: "A", value: "1" },
+-      { id: "b", label: "B", value: "2" },
+-    ],
+-  };
+-  assert.equal(validateInteractiveChoice(bad), false);
+-});
+-
+-// ─── truncateInteractiveChoice ───────────────────────────────
+-test("truncateInteractiveChoice: prompt 超 200 字截断", () => {
+-  const long = "a".repeat(300);
+-  const result = truncateInteractiveChoice({ type: "interactive_choice", prompt: long, options: [validOption] });
+-  assert.equal(result.prompt.length, 200);
+-});
+-
+-test("truncateInteractiveChoice: title 超 30 字截断", () => {
+-  const result = truncateInteractiveChoice({ ...validPart, title: "a".repeat(50) });
+-  assert.equal(result.title.length, 30);
+-});
+-
+-test("truncateInteractiveChoice: option.label 超 30 字截断", () => {
+-  const opt = { ...validOption, label: "a".repeat(60) };
+-  const result = truncateInteractiveChoice({ ...validPart, options: [opt] });
+-  assert.equal(result.options[0].label.length, 30);
+-});
+-
+-test("truncateInteractiveChoice: option.description 超 200 字截断", () => {
+-  const opt = { ...validOption, description: "a".repeat(300) };
+-  const result = truncateInteractiveChoice({ ...validPart, options: [opt] });
+-  assert.equal(result.options[0].description.length, 200);
+-});
+-
+-test("truncateInteractiveChoice: input_placeholder 超 60 字截断", () => {
+-  const result = truncateInteractiveChoice({ ...validPart, input_placeholder: "a".repeat(100) });
+-  assert.equal(result.input_placeholder.length, 60);
+-});
+-
+-test("truncateInteractiveChoice: value 不截断", () => {
+-  const longValue = "a".repeat(1000);
+-  const result = truncateInteractiveChoice({
+-    ...validPart,
+-    options: [{ ...validOption, value: longValue }],
+-  });
+-  assert.equal(result.options[0].value.length, 1000);
+-});
+-
+-test("truncateInteractiveChoice: 短字段不动", () => {
+-  const result = truncateInteractiveChoice(validPart);
+-  assert.equal(result, validPart);  // 不可变:如果未截断,返回原对象
+-});
+-
+-// ════════════════════════════════════════════════════════════════
+-// 端到端: 真实插件输出 → dashboard pipeline
+-// ════════════════════════════════════════════════════════════════
+-//
+-// 模拟 astrbot_plugin_ask_user/ask_user_choice_tool.py 真实输出。
+-// 关键 case:
+-// 1. 工具返回的 JSON 字符串(被 framework 包成 Plain {type:"text",data:{text:<json>}},
+-//    dashboard 转为 {type:"plain",text:<json>}) → 完整端到端 unwrap+validate+truncate 链
+-// 2. 真实插件的 description=null(LLM 不传或传 None 时,(x or "")[:200] or None → null)
+-// 3. 真实插件的软错误("错误:..." 不以 { 开头 → 保持原 plain,不重写)
+-
+-// ─── 真实插件输出 fixture ───────────────────────────────────
+-function simulateAskUserChoiceTool(prompt, options, title, input_placeholder) {
+-  // 镜像 ask_user_choice_tool.py:188-200 的拼装逻辑
+-  const payload = { type: "interactive_choice", prompt, options };
+-  if (title) payload.title = title;
+-  if (input_placeholder) payload.input_placeholder = input_placeholder;
+-  return JSON.stringify(payload, null, 0);  // 模拟 ensure_ascii=False 的紧凑形式
+-}
+-
+-test("E2E 真实插件输出: 完整选项 + description=null 的 JSON 字符串", () => {
+-  // 镜像 ask_user_choice_tool.py:160-177:description 为 null 时 (opt.get('description') or '')[:200] or None → null
+-  const pluginJson = JSON.stringify({
+-    type: "interactive_choice",
+-    prompt: "请选择模型:",
+-    options: [
+-      { id: "a", label: "GPT-4", description: null, value: "gpt-4" },
+-      { id: "b", label: "GPT-4 mini", value: "gpt-4-mini" },
+-    ],
+-  });
+-
+-  // framework 包成 Plain → dashboard 转为 MessagePart
+-  const plainPart = { type: "plain", text: pluginJson };
+-
+-  // 完整 pipeline
+-  const unwrapped = unwrapInteractiveChoice(plainPart);
+-  assert.equal(unwrapInteractiveChoice.name === "unwrapInteractiveChoice" || typeof unwrapped === "object", true);
+-  assert.equal(isInteractiveChoicePayload(unwrapped), true);
+-  assert.equal(validateInteractiveChoice(unwrapped), true);
+-  const truncated = truncateInteractiveChoice(unwrapped);
+-  assert.equal(truncated.type, "interactive_choice");
+-  assert.equal(truncated.prompt, "请选择模型:");
+-  assert.equal(truncated.options.length, 2);
+-  // description=null 保留为 null(v-if 会隐藏该 <span>)
+-  assert.equal(truncated.options[0].description, null);
+-  assert.equal(truncated.options[1].description, undefined);  // 缺省字段不出现
+-});
+-
+-test("E2E 真实插件输出: title + input_placeholder + 全描述", () => {
+-  const pluginJson = simulateAskUserChoiceTool(
+-    "选择操作",
+-    [
+-      { id: "del", label: "删除文件", description: "不可逆", value: "delete" },
+-      { id: "cancel", label: "取消", value: "cancel" },
+-    ],
+-    "操作确认",
+-    "或输入自定义操作",
+-  );
+-  const plainPart = { type: "plain", text: pluginJson };
+-  const unwrapped = unwrapInteractiveChoice(plainPart);
+-  const result = truncateInteractiveChoice(unwrapped);
+-
+-  assert.equal(result.title, "操作确认");
+-  assert.equal(result.input_placeholder, "或输入自定义操作");
+-  assert.equal(result.options[0].description, "不可逆");
+-});
+-
+-test("E2E 真实插件软错误: '错误:...' 不以 { 开头,保留原 plain", () => {
+-  // ask_user_choice_tool.py:108 返回 "错误:prompt 必填且不能为空。"
+-  const errPart = { type: "plain", text: "错误:prompt 必填且不能为空。" };
+-  const result = unwrapInteractiveChoice(errPart);
+-  // 错误不是 JSON,不重写
+-  assert.deepEqual(result, errPart);
+-  // validate 也不动它
+-  assert.equal(validateInteractiveChoice(result), false);
+-});
+-
+-test("E2E 真实插件超长 prompt: 工具层已截到 200,前端再截是 no-op", () => {
+-  // 假设 LLM 传了 5000 字符 prompt,工具层截到 200 后打包
+-  const longPrompt = "a".repeat(5000);
+-  const truncatedPrompt = longPrompt.slice(0, 200);  // 镜像 ask_user_choice_tool.py:182
+-  const pluginJson = JSON.stringify({
+-    type: "interactive_choice",
+-    prompt: truncatedPrompt,
+-    options: [
+-      { id: "a", label: "A", value: "a" },
+-      { id: "b", label: "B", value: "b" },
+-    ],
+-  });
+-  const plainPart = { type: "plain", text: pluginJson };
+-  const result = truncateInteractiveChoice(unwrapInteractiveChoice(plainPart));
+-  // 截断后仍为 200 字符(JSON.parse 已建新对象,引用必然变,只校验内容)
+-  assert.equal(result.prompt.length, 200);
+-  assert.equal(result.type, "interactive_choice");
+-  // truncate 自身判断:prompt 已经是 200(等于上限,不超)→ mutated=false → 返回 unwrap 后的对象
+-  // unwrap 后的对象 = 不可变(no-op 路径)的 truncate 输出
+-  // 注意:与"短字段不动"那个 test 不可变语义不同(那个是直接传 InteractiveChoicePart)
+-  const result2 = truncateInteractiveChoice(result);
+-  assert.equal(result2, result);  // 二次 truncate 无变化时返回同一引用
+-});
+-
+-test("E2E 真实插件超长 description: 工具层已截到 200,前端再截是 no-op", () => {
+-  const longDesc = "x".repeat(500);
+-  const truncatedDesc = longDesc.slice(0, 200);  // 镜像 ask_user_choice_tool.py:175
+-  const pluginJson = JSON.stringify({
+-    type: "interactive_choice",
+-    prompt: "选",
+-    options: [
+-      { id: "a", label: "A", description: truncatedDesc, value: "a" },
+-      { id: "b", label: "B", value: "b" },
+-    ],
+-  });
+-  const plainPart = { type: "plain", text: pluginJson };
+-  const result = truncateInteractiveChoice(unwrapInteractiveChoice(plainPart));
+-  assert.equal(result.options[0].description.length, 200);
+-});
+-
+-test("E2E 真实插件极端: 10 options + 缺 description,全部通过", () => {
+-  // 工具层 _OPTIONS_MAX=10,这是 v1 边界
+-  const pluginJson = JSON.stringify({
+-    type: "interactive_choice",
+-    prompt: "选一个",
+-    options: Array.from({ length: 10 }, (_, i) => ({
+-      id: `opt${i}`,
+-      label: `Option ${i}`,
+-      value: `val${i}`,
+-      // description 故意不传(LLM 忽略)
+-    })),
+-  });
+-  const plainPart = { type: "plain", text: pluginJson };
+-  const unwrapped = unwrapInteractiveChoice(plainPart);
+-  assert.equal(validateInteractiveChoice(unwrapped), true);
+-  const result = truncateInteractiveChoice(unwrapped);
+-  assert.equal(result.options.length, 10);
+-});
+\ No newline at end of file
+diff --git a/dashboard/tsconfig.json b/dashboard/tsconfig.json
+index 7820a40b1..8f821c0c7 100644
+--- a/dashboard/tsconfig.json
++++ b/dashboard/tsconfig.json
+@@ -1,18 +1,21 @@
+ {
+   "extends": "@vue/tsconfig/tsconfig.dom.json",
+   "include": ["env.d.ts", "src/**/*", "src/**/*.vue", "src/types/.d.ts"],
+   "compilerOptions": {
+     "ignoreDeprecations": "5.0",
+     "baseUrl": ".",
+     "paths": {
+       "@/*": ["./src/*"]
+     },
+-    "allowJs": true
++    "allowJs": true,
++    "allowImportingTsExtensions": true,
++    "noEmit": true,
++    "types": ["node"]
+   },
+ 
+   "references": [
+     {
+       "path": "./tsconfig.vite-config.json"
+     }
+   ]
+ }

@@ -1,0 +1,97 @@
+# Review package: HEAD~1..HEAD
+
+## Commits
+501faff feat(registry): add resolve with double-call protection
+
+## Files changed
+ interactive_choice_registry.py            | 18 ++++++++++++++++
+ tests/test_interactive_choice_registry.py | 35 +++++++++++++++++++++++++++++++
+ 2 files changed, 53 insertions(+)
+
+## Diff
+diff --git a/interactive_choice_registry.py b/interactive_choice_registry.py
+index 3f8a137..39e7add 100644
+--- a/interactive_choice_registry.py
++++ b/interactive_choice_registry.py
+@@ -63,13 +63,31 @@ class InteractiveChoiceRegistry:
+         if pending is None:
+             return
+         ids = self._by_umo.get(pending.umo)
+         if ids is not None:
+             ids.discard(request_id)
+             if not ids:
+                 self._by_umo.pop(pending.umo, None)
+         if not pending.future.done():
+             pending.future.cancel()
+ 
++    def resolve(self, request_id: str, payload: dict) -> bool:
++        """Set future result。已 resolve 或不存在返回 False。
++
++        Args:
++            request_id: 由 add() 注册的 ID。
++            payload: 用户响应,通常是 {choice_id, free_text}。
++
++        Returns:
++            True if successful, False if unknown/already-done.
++        """
++        pending = self._pending.get(request_id)
++        if pending is None:
++            return False
++        if pending.future.done():
++            return False
++        pending.future.set_result(payload)
++        return True
++
+ 
+ # 全局单例
+ registry = InteractiveChoiceRegistry()
+diff --git a/tests/test_interactive_choice_registry.py b/tests/test_interactive_choice_registry.py
+index 24fe125..9456132 100644
+--- a/tests/test_interactive_choice_registry.py
++++ b/tests/test_interactive_choice_registry.py
+@@ -55,10 +55,45 @@ def test_remove_cancels_unfinished_future():
+     reg.add(
+         "r1",
+         "webchat:FriendMessage:webchat!alice!sess",
+         fut,
+         {"prompt": "x", "options": [{"id": "A", "label": "a"}]},
+         0.0,
+         100.0,
+     )
+     reg.remove("r1")
+     assert fut.cancelled() or fut.done()
++
++
++def test_resolve_sets_future_result():
++    reg = InteractiveChoiceRegistry()
++    fut = _make_future()
++    reg.add("r1", "webchat:FriendMessage:webchat!alice!sess", fut,
++            {"prompt": "x", "options": [{"id": "A", "label": "a"}]}, 0.0, 100.0)
++    assert reg.resolve("r1", {"choice_id": "A", "free_text": ""}) is True
++    assert fut.result() == {"choice_id": "A", "free_text": ""}
++
++
++def test_resolve_unknown_returns_false():
++    reg = InteractiveChoiceRegistry()
++    assert reg.resolve("nonexistent", {"choice_id": "A"}) is False
++
++
++def test_resolve_double_call_protected():
++    reg = InteractiveChoiceRegistry()
++    fut = _make_future()
++    reg.add("r1", "webchat:FriendMessage:webchat!alice!sess", fut,
++            {"prompt": "x", "options": [{"id": "A", "label": "a"}]}, 0.0, 100.0)
++    assert reg.resolve("r1", {"choice_id": "A"}) is True
++    # 第二次 resolve 应返回 False(防双 resolve)
++    assert reg.resolve("r1", {"choice_id": "B"}) is False
++    # future 仍是第一次的结果
++    assert fut.result() == {"choice_id": "A"}
++
++
++def test_resolve_after_remove_returns_false():
++    reg = InteractiveChoiceRegistry()
++    fut = _make_future()
++    reg.add("r1", "webchat:FriendMessage:webchat!alice!sess", fut,
++            {"prompt": "x", "options": [{"id": "A", "label": "a"}]}, 0.0, 100.0)
++    reg.remove("r1")  # 移除后 future 被 cancel
++    assert reg.resolve("r1", {"choice_id": "A"}) is False

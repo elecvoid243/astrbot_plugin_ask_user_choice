@@ -21,7 +21,13 @@ def _freeze_registry_clock(monkeypatch):
 
 
 def _make_future() -> asyncio.Future:
-    return asyncio.get_event_loop().create_future()
+    """Create a Future compatible with Python 3.12+ (no implicit event loop)."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.create_future()
 
 
 def test_add_registers_pending():
@@ -209,8 +215,14 @@ def test_list_pending_includes_spec_and_timestamps():
 def test_stats_returns_counts():
     reg = InteractiveChoiceRegistry()
     fut = _make_future()
-    reg.add("r1", "webchat:FriendMessage:webchat!alice!sess", fut,
-            {"prompt": "x", "options": [{"id": "A", "label": "a"}]}, 0.0, 100.0)
+    reg.add(
+        "r1",
+        "webchat:FriendMessage:webchat!alice!sess",
+        fut,
+        {"prompt": "x", "options": [{"id": "A", "label": "a"}]},
+        0.0,
+        100.0,
+    )
     stats = reg.stats()
     assert stats["total_pending"] == 1
     assert stats["by_umo"]["webchat:FriendMessage:webchat!alice!sess"] == 1
@@ -221,12 +233,24 @@ async def test_shutdown_cancels_all_futures():
     reg = InteractiveChoiceRegistry()
     fut1 = _make_future()
     fut2 = _make_future()
-    reg.add("r1", "webchat:FriendMessage:webchat!alice!sess", fut1,
-            {"prompt": "x", "options": [{"id": "A", "label": "a"}]}, 0.0, 100.0)
-    reg.add("r2", "webchat:FriendMessage:webchat!bob!sess", fut2,
-            {"prompt": "y", "options": [{"id": "B", "label": "b"}]}, 0.0, 100.0)
+    reg.add(
+        "r1",
+        "webchat:FriendMessage:webchat!alice!sess",
+        fut1,
+        {"prompt": "x", "options": [{"id": "A", "label": "a"}]},
+        0.0,
+        100.0,
+    )
+    reg.add(
+        "r2",
+        "webchat:FriendMessage:webchat!bob!sess",
+        fut2,
+        {"prompt": "y", "options": [{"id": "B", "label": "b"}]},
+        0.0,
+        100.0,
+    )
     await reg.shutdown()
-    assert (fut1.cancelled() or fut1.done())
-    assert (fut2.cancelled() or fut2.done())
+    assert fut1.cancelled() or fut1.done()
+    assert fut2.cancelled() or fut2.done()
     assert reg._pending == {}
     assert reg._by_umo == {}

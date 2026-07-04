@@ -35,7 +35,12 @@ def _make_config(enabled: bool = True) -> MagicMock:
 
 def _run(coro):
     """简化:把 async coro 跑完。"""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
 
 
 # ── initialize() 行为 ────────────────────────────────────────────

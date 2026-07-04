@@ -1,0 +1,163 @@
+# Review package: HEAD~1..HEAD
+
+## Commits
+30932a7 feat(api): add GET /api/chat/interactive-choice/pending
+
+## Files changed
+ interactive_choice_api.py            | 33 +++++++++++++
+ tests/test_interactive_choice_api.py | 89 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 122 insertions(+)
+
+## Diff
+diff --git a/interactive_choice_api.py b/interactive_choice_api.py
+index f904a1f..be4f6d9 100644
+--- a/interactive_choice_api.py
++++ b/interactive_choice_api.py
+@@ -73,10 +73,43 @@ async def submit_interactive_choice(
+         raise ApiError("Missing key: choice_id", status_code=400)
+     free_text = body.get("free_text") or ""
+     if not isinstance(free_text, str):
+         free_text = ""
+ 
+     payload = {"choice_id": choice_id.strip(), "free_text": free_text.strip()}
+     if not registry.resolve(request_id, payload):
+         raise ApiError("Already resolved or expired", status_code=409)
+ 
+     return ok({"request_id": request_id, "resolved_at": time.time()})
++
++
++@router.get("/api/chat/interactive-choice/pending")
++async def get_pending_choices(
++    session_id: str | None = None,
++    username: str = Depends(require_dashboard_user),
++):
++    """Return all pending choices for a given webchat UMO.
++
++    Used by the frontend on mount/reconnect to reconcile any choices the
++    user has not yet answered. Read-only; never mutates registry state.
++
++    Args:
++        session_id: Full UMO, e.g.
++            ``webchat:FriendMessage:webchat!alice!sess``.
++        username: Injected by ``require_dashboard_user``.
++
++    Returns:
++        200: ``{status: "ok", data: {pending: [...]}}``
++        400: Missing ``session_id`` or session_id is not a webchat UMO.
++        403: ``session_id`` belongs to a different dashboard user.
++    """
++    if not session_id or not session_id.strip():
++        raise ApiError("Missing query param: session_id", status_code=400)
++
++    expected = _extract_username_from_umo(session_id)
++    if not expected:
++        raise ApiError("session_id must be a webchat UMO", status_code=400)
++    if expected != username:
++        raise ApiError("Not authorized for this session", status_code=403)
++
++    items = registry.list_pending_for_umo(session_id)
++    return ok({"pending": items})
+diff --git a/tests/test_interactive_choice_api.py b/tests/test_interactive_choice_api.py
+index f82dce2..ea80396 100644
+--- a/tests/test_interactive_choice_api.py
++++ b/tests/test_interactive_choice_api.py
+@@ -165,10 +165,99 @@ def test_post_double_call_returns_409(client):
+         0.0,
+         time.time() + 60,
+     )
+     try:
+         client.post("/api/chat/interactive-choice/rid-1", json={"choice_id": "A"})
+         # 第二次
+         r = client.post("/api/chat/interactive-choice/rid-1", json={"choice_id": "B"})
+         assert r.status_code == 409
+     finally:
+         registry.remove("rid-1")
++
++
++# ---------------------------------------------------------------------------
++# GET /api/chat/interactive-choice/pending?session_id=<umo>
++# ---------------------------------------------------------------------------
++
++
++def test_get_pending_400_when_missing_session_id(client):
++    # 缺 session_id 查询参数
++    r = client.get("/api/chat/interactive-choice/pending")
++    assert r.status_code == 400
++
++
++def test_get_pending_400_for_non_webchat_session(client):
++    # alice 登录,但 session_id 不是 webchat 格式
++    r = client.get(
++        "/api/chat/interactive-choice/pending",
++        params={"session_id": "lark:FriendMessage:lark!alice!sess"},
++    )
++    assert r.status_code == 400
++
++
++def test_get_pending_403_when_other_user(client):
++    # bob 登录,去查 alice 的 session
++    from starlette.responses import JSONResponse
++
++    from astrbot.dashboard.api.auth import require_dashboard_user
++    from astrbot.dashboard.responses import ApiError, error
++
++    app = FastAPI()
++    app.include_router(router)
++
++    @app.exception_handler(ApiError)
++    async def api_error_handler(_request, exc: ApiError):
++        return JSONResponse(error(exc.message), status_code=exc.status_code)
++
++    app.dependency_overrides[require_dashboard_user] = lambda: "bob"
++    c = TestClient(app)
++
++    alice_umo = "webchat:FriendMessage:webchat!alice!sess"
++    fut = asyncio.get_event_loop().create_future()
++    registry.add(
++        "rid-1",
++        alice_umo,
++        fut,
++        {"prompt": "x", "options": [{"id": "A", "label": "a"}]},
++        0.0,
++        time.time() + 60,
++    )
++    try:
++        r = c.get(
++            "/api/chat/interactive-choice/pending",
++            params={"session_id": alice_umo},
++        )
++        assert r.status_code == 403
++    finally:
++        registry.remove("rid-1")
++
++
++def test_get_pending_returns_alice_pending(client):
++    # alice 登录,查询自己 session 下的 pending
++    alice_umo = "webchat:FriendMessage:webchat!alice!sess"
++    fut = asyncio.get_event_loop().create_future()
++    spec = {
++        "prompt": "choose",
++        "options": [{"id": "A", "label": "alpha"}],
++    }
++    registry.add(
++        "rid-1",
++        alice_umo,
++        fut,
++        spec,
++        0.0,
++        time.time() + 60,
++    )
++    try:
++        r = client.get(
++            "/api/chat/interactive-choice/pending",
++            params={"session_id": alice_umo},
++        )
++        assert r.status_code == 200
++        body = r.json()
++        assert body["status"] == "ok"
++        items = body["data"]["pending"]
++        assert len(items) == 1
++        assert items[0]["request_id"] == "rid-1"
++        assert items[0]["spec"] == spec
++    finally:
++        registry.remove("rid-1")

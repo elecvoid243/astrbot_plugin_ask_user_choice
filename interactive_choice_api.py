@@ -1,7 +1,7 @@
 """REST 端点:interactive-choice 提交与 pending 列表。
 
 挂在 dashboard app:POST /api/chat/interactive-choice/<request_id>
-                  GET  /api/chat/interactive-choice/pending
+                  POST /api/chat/interactive-choice/pending
 """
 
 from __future__ import annotations
@@ -82,9 +82,10 @@ async def submit_interactive_choice(
     return ok({"request_id": request_id, "resolved_at": time.time()})
 
 
-@router.get("/api/chat/interactive-choice/pending")
+@router.post("/api/chat/interactive-choice/pending")
 async def get_pending_choices(
     session_id: str | None = None,
+    payload: dict | None = None,
     username: str = Depends(require_dashboard_user),
 ):
     """Return all pending choices for a given webchat UMO.
@@ -93,8 +94,10 @@ async def get_pending_choices(
     user has not yet answered. Read-only; never mutates registry state.
 
     Args:
-        session_id: Full UMO, e.g.
-            ``webchat:FriendMessage:webchat!alice!sess``.
+        session_id: Full UMO (query param) — ``None`` allowed so the
+            endpoint can also accept it in the JSON body.
+        payload: POST body, optional. Used as a fallback source for
+            ``session_id`` when the query param is absent.
         username: Injected by ``require_dashboard_user``.
 
     Returns:
@@ -102,8 +105,12 @@ async def get_pending_choices(
         400: Missing ``session_id`` or session_id is not a webchat UMO.
         403: ``session_id`` belongs to a different dashboard user.
     """
+    if (not session_id or not session_id.strip()) and payload:
+        sid = payload.get("session_id")
+        if isinstance(sid, str) and sid.strip():
+            session_id = sid
     if not session_id or not session_id.strip():
-        raise ApiError("Missing query param: session_id", status_code=400)
+        raise ApiError("Missing session_id (query or body)", status_code=400)
 
     expected = _extract_username_from_umo(session_id)
     if not expected:

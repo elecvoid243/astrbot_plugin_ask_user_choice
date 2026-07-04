@@ -1,0 +1,78 @@
+# Review package: HEAD~1..HEAD
+
+## Commits
+0a0d37f feat(api): add _extract_username_from_umo helper
+
+## Files changed
+ interactive_choice_api.py            | 29 +++++++++++++++++++++++++++++
+ tests/test_interactive_choice_api.py | 26 ++++++++++++++++++++++++++
+ 2 files changed, 55 insertions(+)
+
+## Diff
+diff --git a/interactive_choice_api.py b/interactive_choice_api.py
+new file mode 100644
+index 0000000..b8afaf0
+--- /dev/null
++++ b/interactive_choice_api.py
+@@ -0,0 +1,29 @@
++"""REST 端点:interactive-choice 提交与 pending 列表。
++
++挂在 dashboard app:POST /api/chat/interactive-choice/<request_id>
++                  GET  /api/chat/interactive-choice/pending
++"""
++from __future__ import annotations
++
++from .interactive_choice_registry import registry
++
++
++def _extract_username_from_umo(umo: str) -> str:
++    """从 webchat umo 提取 dashboard username。
++
++    预期格式: 'webchat:FriendMessage:webchat!alice!session_id'
++    返回 'alice';失败(非 webchat / 格式错)返回 ''。
++    """
++    if not umo.startswith("webchat:"):
++        return ""
++    parts = umo.split(":", 2)
++    if len(parts) < 3:
++        return ""
++    session_key = parts[2]
++    chunks = session_key.split("!")
++    if len(chunks) >= 3 and chunks[0] == "webchat":
++        return chunks[1]
++    return ""
++
++
++# 端点实现见 Task 9, Task 10
+diff --git a/tests/test_interactive_choice_api.py b/tests/test_interactive_choice_api.py
+new file mode 100644
+index 0000000..8d9da4a
+--- /dev/null
++++ b/tests/test_interactive_choice_api.py
+@@ -0,0 +1,26 @@
++"""REST 端点单元测试。"""
++from astrbot_plugin_ask_user_choice.interactive_choice_api import (
++    _extract_username_from_umo,
++)
++
++
++def test_extract_username_from_webchat_umo():
++    umo = "webchat:FriendMessage:webchat!alice!sess-123"
++    assert _extract_username_from_umo(umo) == "alice"
++
++
++def test_extract_username_returns_empty_for_non_webchat():
++    umo = "lark:FriendMessage:lark!alice!sess-123"
++    assert _extract_username_from_umo(umo) == ""
++
++
++def test_extract_username_returns_empty_for_malformed():
++    assert _extract_username_from_umo("invalid") == ""
++    assert _extract_username_from_umo("webchat:FriendMessage") == ""  # 缺 session_key
++    assert _extract_username_from_umo("webchat:FriendMessage:bad") == ""  # 缺 !
++    assert _extract_username_from_umo("webchat:FriendMessage:foo!bar") == ""  # 缺 platform 头
++
++
++def test_extract_username_handles_dots_and_dashes():
++    umo = "webchat:FriendMessage:webchat!alice.smith_2!sess-2025-07-02"
++    assert _extract_username_from_umo(umo) == "alice.smith_2"

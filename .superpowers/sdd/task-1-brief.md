@@ -1,0 +1,181 @@
+## Task 1: Registry 核心(add/remove + PendingChoice)
+
+**Files:**
+- Create: `astrbot_plugin_ask_user_choice/interactive_choice_registry.py`
+- Test: `astrbot_plugin_ask_user_choice/tests/__init__.py`(空)
+- Test: `astrbot_plugin_ask_user_choice/tests/test_interactive_choice_registry.py`
+
+**Interfaces:**
+- Produces: `class PendingChoice` with fields `request_id: str`, `umo: str`, `future: asyncio.Future`, `spec: dict`, `created_at: float`, `timeout_at: float`, `cleanup_done: bool = False`
+- Produces: `class InteractiveChoiceRegistry` with methods `add()`, `remove()`
+
+- [ ] **Step 1: Create test directory and __init__.py**
+
+```bash
+mkdir -p astrbot_plugin_ask_user_choice/tests
+touch astrbot_plugin_ask_user_choice/tests/__init__.py
+```
+
+- [ ] **Step 2: Write failing test for add/remove**
+
+`astrbot_plugin_ask_user_choice/tests/test_interactive_choice_registry.py`:
+
+```python
+"""InteractiveChoiceRegistry 单元测试。"""
+import asyncio
+
+from astrbot_plugin_ask_user_choice.interactive_choice_registry import (
+    InteractiveChoiceRegistry,
+)
+
+
+def _make_future() -> asyncio.Future:
+    return asyncio.get_event_loop().create_future()
+
+
+def test_add_registers_pending():
+    reg = InteractiveChoiceRegistry()
+    fut = _make_future()
+    reg.add(
+        request_id="r1",
+        umo="webchat:FriendMessage:webchat!alice!sess",
+        future=fut,
+        spec={"prompt": "x", "options": [{"id": "A", "label": "a"}]},
+        created_at=0.0,
+        timeout_at=100.0,
+    )
+    assert "r1" in reg._pending
+    assert "r1" in reg._by_umo["webchat:FriendMessage:webchat!alice!sess"]
+
+
+def test_remove_clears_pending_and_by_umo():
+    reg = InteractiveChoiceRegistry()
+    fut = _make_future()
+    umo = "webchat:FriendMessage:webchat!alice!sess"
+    reg.add("r1", umo, fut, {"prompt": "x", "options": [{"id": "A", "label": "a"}]}, 0.0, 100.0)
+    reg.remove("r1")
+    assert "r1" not in reg._pending
+    assert umo not in reg._by_umo  # umo 索引被清空
+
+
+def test_remove_unknown_is_noop():
+    reg = InteractiveChoiceRegistry()
+    reg.remove("nonexistent")  # 不应抛异常
+    assert reg._pending == {}
+
+
+def test_remove_cancels_unfinished_future():
+    reg = InteractiveChoiceRegistry()
+    fut = _make_future()
+    reg.add("r1", "webchat:FriendMessage:webchat!alice!sess", fut,
+            {"prompt": "x", "options": [{"id": "A", "label": "a"}]}, 0.0, 100.0)
+    reg.remove("r1")
+    assert fut.cancelled() or fut.done()
+```
+
+- [ ] **Step 3: Run test to verify it fails**
+
+```bash
+cd astrbot_plugin_ask_user_choice && python -m pytest tests/test_interactive_choice_registry.py -v
+```
+
+Expected: FAIL with `ModuleNotFoundError: No module named 'astrbot_plugin_ask_user_choice.interactive_choice_registry'`
+
+- [ ] **Step 4: Write minimal implementation**
+
+`astrbot_plugin_ask_user_choice/interactive_choice_registry.py`:
+
+```python
+"""InteractiveChoiceRegistry: in-memory 等待池,管理 ask_user_choice 工具的 Future。
+
+单例(global `registry`),工具内 await Future,REST 端点 set_result。
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class PendingChoice:
+    """单个等待中的 interactive_choice 状态。"""
+    request_id: str
+    umo: str
+    future: asyncio.Future
+    spec: dict
+    created_at: float
+    timeout_at: float
+    cleanup_done: bool = False
+
+
+class InteractiveChoiceRegistry:
+    """In-memory pending 池,O(1) 查询 + per-umo 索引。
+
+    Attributes:
+        _pending: request_id → PendingChoice
+        _by_umo: umo → set[request_id]
+    """
+
+    def __init__(self) -> None:
+        self._pending: dict[str, PendingChoice] = {}
+        self._by_umo: dict[str, set[str]] = {}
+
+    def add(
+        self,
+        request_id: str,
+        umo: str,
+        future: asyncio.Future,
+        spec: dict,
+        created_at: float,
+        timeout_at: float,
+    ) -> None:
+        """注册一个等待中的 choice(同步,工具内 await 前调用)。"""
+        self._pending[request_id] = PendingChoice(
+            request_id=request_id,
+            umo=umo,
+            future=future,
+            spec=spec,
+            created_at=created_at,
+            timeout_at=timeout_at,
+        )
+        self._by_umo.setdefault(umo, set()).add(request_id)
+
+    def remove(self, request_id: str) -> None:
+        """从池中移除一个 choice。cancel 未完成的 future。"""
+        pending = self._pending.pop(request_id, None)
+        if pending is None:
+            return
+        ids = self._by_umo.get(pending.umo)
+        if ids is not None:
+            ids.discard(request_id)
+            if not ids:
+                self._by_umo.pop(pending.umo, None)
+        if not pending.future.done():
+            pending.future.cancel()
+
+
+# 全局单例
+registry = InteractiveChoiceRegistry()
+```
+
+- [ ] **Step 5: Run test to verify it passes**
+
+```bash
+cd astrbot_plugin_ask_user_choice && python -m pytest tests/test_interactive_choice_registry.py -v
+```
+
+Expected: 4 passed
+
+- [ ] **Step 6: Format and commit**
+
+```bash
+cd astrbot_plugin_ask_user_choice && ruff check interactive_choice_registry.py tests/ --fix && ruff format .
+git add interactive_choice_registry.py tests/
+git commit -m "feat(registry): add InteractiveChoiceRegistry core (add/remove)"
+```
+
+---

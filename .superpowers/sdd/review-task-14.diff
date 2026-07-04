@@ -1,0 +1,78 @@
+# Review package: HEAD~1..HEAD
+
+## Commits
+ff16a843d refactor(frontend): change InteractiveChoiceBox emit to (requestId, payload)
+
+## Files changed
+ .../chat/message_list_comps/InteractiveChoiceBox.vue          | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/dashboard/src/components/chat/message_list_comps/InteractiveChoiceBox.vue b/dashboard/src/components/chat/message_list_comps/InteractiveChoiceBox.vue
+index 22f3ee91f..a651e30a8 100644
+--- a/dashboard/src/components/chat/message_list_comps/InteractiveChoiceBox.vue
++++ b/dashboard/src/components/chat/message_list_comps/InteractiveChoiceBox.vue
+@@ -96,22 +96,24 @@ import {
+   type InteractiveChoicePart,
+   type InteractiveChoiceOption,
+ } from "@/composables/parseInteractiveChoice";
+ 
+ const props = defineProps<{
+   part: InteractiveChoicePart;
+   isDark?: boolean;
+   isIgnored?: boolean;
+ }>();
+ 
++// v1.0 提交协议:emit (requestId, payload),由 ChatMessageList 冒泡到 Chat.vue
++// 处理实际发送。payload.choice_id 为 "__free_text__" 表示自由文本提交。
+ const emit = defineEmits<{
+-  submit: [text: string];
++  submit: [requestId: string, payload: { choice_id: string; free_text: string }];
+ }>();
+ 
+ const { tm } = useModuleI18n("features/chat");
+ 
+ // ── 内部状态 ─────────────────────────────────────────────────
+ const submittedValue = ref<string | null>(null);
+ const submittedKind = ref<"option" | "input" | null>(null);
+ const freeText = ref("");
+ 
+ // ── 派生状态机 ───────────────────────────────────────────────
+@@ -134,32 +136,35 @@ const submittedLabel = computed(() => {
+ });
+ 
+ const submittedOptionId = ref<string | null>(null);
+ 
+ const inputPlaceholderResolved = computed(
+   () => props.part.input_placeholder || tm("interactiveChoice.defaultPlaceholder"),
+ );
+ 
+ function onOptionClick(opt: InteractiveChoiceOption) {
+   if (state.value !== "pending") return;
++  // 先 emit,再更新本地状态,保证父组件拿到的 requestId 与本次选项匹配
++  emit("submit", props.part.request_id, { choice_id: opt.id, free_text: "" });
+   submittedOptionId.value = opt.id;
+   submittedValue.value = getOptionSubmitText(opt);
+   submittedKind.value = "option";
+-  emit("submit", submittedValue.value);
+ }
+ 
+ function onInputSubmit() {
+   const text = freeText.value.trim();
+   if (!text || state.value !== "pending") return;
++  // 自由文本提交:choice_id 用哨兵值 "__free_text__" 标识,真实文本放在 free_text
++  emit("submit", props.part.request_id, { choice_id: "__free_text__", free_text: text });
+   submittedValue.value = text;
+   submittedKind.value = "input";
+-  emit("submit", text);
++  submittedOptionId.value = null;
+ }
+ 
+ function ariaLabelForOption(opt: InteractiveChoiceOption): string {
+   return opt.description ? `${opt.label} — ${opt.description}` : opt.label;
+ }
+ </script>
+ 
+ <style scoped>
+ .interactive-choice-box {
+   margin: 8px 0;

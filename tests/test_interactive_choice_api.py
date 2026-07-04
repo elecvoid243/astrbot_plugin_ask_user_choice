@@ -14,6 +14,16 @@ from astrbot_plugin_ask_user_choice.interactive_choice_api import (
 from astrbot_plugin_ask_user_choice.interactive_choice_registry import registry
 
 
+def _make_future() -> asyncio.Future:
+    """Create a Future compatible with Python 3.12+ (no implicit event loop)."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.create_future()
+
+
 def test_extract_username_from_webchat_umo():
     umo = "webchat:FriendMessage:webchat!alice!sess-123"
     assert _extract_username_from_umo(umo) == "alice"
@@ -80,7 +90,7 @@ def test_post_404_when_not_found(client):
 
 def test_post_400_when_missing_choice_id(client):
     # 先注册一个 pending
-    fut = asyncio.get_event_loop().create_future()
+    fut = _make_future()
     registry.add(
         "rid-1",
         "webchat:FriendMessage:webchat!alice!sess",
@@ -113,7 +123,7 @@ def test_post_403_when_other_user(client):
     app.dependency_overrides[require_dashboard_user] = lambda: "bob"
     c = TestClient(app)
     # pending 属于 alice
-    fut = asyncio.get_event_loop().create_future()
+    fut = _make_future()
     registry.add(
         "rid-1",
         "webchat:FriendMessage:webchat!alice!sess",
@@ -130,7 +140,7 @@ def test_post_403_when_other_user(client):
 
 
 def test_post_success_resolves_future(client):
-    fut = asyncio.get_event_loop().create_future()
+    fut = _make_future()
     registry.add(
         "rid-1",
         "webchat:FriendMessage:webchat!alice!sess",
@@ -156,7 +166,7 @@ def test_post_success_resolves_future(client):
 
 
 def test_post_double_call_returns_409(client):
-    fut = asyncio.get_event_loop().create_future()
+    fut = _make_future()
     registry.add(
         "rid-1",
         "webchat:FriendMessage:webchat!alice!sess",
@@ -212,7 +222,7 @@ def test_get_pending_403_when_other_user(client):
     c = TestClient(app)
 
     alice_umo = "webchat:FriendMessage:webchat!alice!sess"
-    fut = asyncio.get_event_loop().create_future()
+    fut = _make_future()
     registry.add(
         "rid-1",
         alice_umo,
@@ -232,8 +242,8 @@ def test_get_pending_403_when_other_user(client):
 
 
 def test_get_pending_returns_alice_pending(client):
-    fut1 = asyncio.get_event_loop().create_future()
-    fut2 = asyncio.get_event_loop().create_future()
+    fut1 = _make_future()
+    fut2 = _make_future()
     registry.add(
         "rid-1",
         "webchat:FriendMessage:webchat!alice!sess",

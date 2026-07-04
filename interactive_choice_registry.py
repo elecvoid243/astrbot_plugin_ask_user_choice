@@ -19,6 +19,8 @@ class PendingChoice:
 
     request_id: str
     umo: str
+    sse_message_id: str
+    """触发本次 tool 调用的 webchat event 的 message_id,用于推送 SSE 通知。"""
     future: asyncio.Future
     spec: dict
     created_at: float
@@ -46,11 +48,24 @@ class InteractiveChoiceRegistry:
         spec: dict,
         created_at: float,
         timeout_at: float,
+        sse_message_id: str = "",
     ) -> None:
-        """注册一个等待中的 choice(同步,工具内 await 前调用)。"""
+        """注册一个等待中的 choice(同步,工具内 await 前调用)。
+
+        Args:
+            request_id: 唯一请求 ID。
+            umo: unified_msg_origin。
+            future: 阻塞 Future。
+            spec: choice spec dict。
+            created_at: 创建时间戳。
+            timeout_at: 超时时间戳。
+            sse_message_id: 触发本次 tool 调用的 webchat event 的 message_id,
+                用于推送 SSE 通知。默认为空(不足以支持 SSE 推送)。
+        """
         self._pending[request_id] = PendingChoice(
             request_id=request_id,
             umo=umo,
+            sse_message_id=sse_message_id,
             future=future,
             spec=spec,
             created_at=created_at,
@@ -97,6 +112,23 @@ class InteractiveChoiceRegistry:
                 }
             )
         return result
+
+    def find_pending_by_umo(self, umo: str) -> PendingChoice | None:
+        """返回给定 UMO 下最新的 pending choice,若没有则返回 None。
+
+        用于 :meth:`on_message` 消费消息时快速查找。返回最近创建的
+        (created_at 最大) 仍在 pending 的 choice。
+        """
+        ids = self._by_umo.get(umo, set())
+        now = time.time()
+        best: PendingChoice | None = None
+        for rid in ids:
+            p = self._pending.get(rid)
+            if p is None or p.future.done() or p.timeout_at < now:
+                continue
+            if best is None or p.created_at > best.created_at:
+                best = p
+        return best
 
     def resolve(self, request_id: str, payload: dict) -> bool:
         """Set future result。已 resolve 或不存在返回 False。

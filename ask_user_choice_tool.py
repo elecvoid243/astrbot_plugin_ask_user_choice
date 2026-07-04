@@ -6,19 +6,19 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from astrbot.api import FunctionTool
-from astrbot.core.utils.io import get_astrbot_data_path  # noqa: F401
-
-from .interactive_choice_registry import registry
 
 # lifted to module top per Plan Amendment B so tests can monkeypatch this binding
 from astrbot.core.platform.sources.webchat.webchat_queue_mgr import webchat_queue_mgr
+from astrbot.core.utils.io import get_astrbot_data_path  # noqa: F401
+
+from .api_mount import _mount_api_router, _push_resolved_event_to_back_queue
+from .interactive_choice_registry import registry
 
 if TYPE_CHECKING:
     from astrbot.core.agent.run_context import ContextWrapper
@@ -145,7 +145,7 @@ class AskUserChoiceTool(FunctionTool):
             spec["input_placeholder"] = placeholder.strip()[:_INPUT_PLACEHOLDER_MAX]
         return spec
 
-    async def call(self, context: "ContextWrapper", **kwargs: Any) -> str:
+    async def call(self, context: ContextWrapper, **kwargs: Any) -> str:
         """阻塞等待用户响应,完成后返回用户选择给 LLM。
 
         Args:
@@ -159,12 +159,26 @@ class AskUserChoiceTool(FunctionTool):
             错误: "Error: ..."
         """
         # ── 1. 平台守卫 ──
-        umo = context.context.event.unified_msg_origin
+        event = context.context.event
+        umo = event.unified_msg_origin
         if not umo.startswith("webchat:"):
             return (
                 "Error: ask_user_choice is only supported in the webchat dashboard. "
                 f"Current platform: {umo.split(':', 1)[0]}. "
                 "Please open the dashboard to make your selection."
+            )
+
+        # ── 1.5. SSE 流的 message_id (chat_service 创建的 uuid,正是它 poll 的 back_queue key)
+        #   webchat_event.send_streaming 也用同一个 message_id 当 key,所以这里必须用
+        #   event.message_obj.message_id 而非 request_id,否则事件会进孤儿 back_queue,
+        #   chat_service 永远 poll 不到,前端永远收不到。
+        sse_message_id = str(
+            getattr(getattr(event, "message_obj", None), "message_id", "") or ""
+        )
+        if not sse_message_id:
+            return (
+                "Error: ask_user_choice requires a non-empty message_id on "
+                "the originating webchat event."
             )
 
         # ── 2. 参数校验 ──
@@ -204,7 +218,20 @@ class AskUserChoiceTool(FunctionTool):
             spec=spec,
             created_at=time.time(),
             timeout_at=expires_at,
+            sse_message_id=sse_message_id,
         )
+
+        # ── 5.1 惰性挂载 REST 端点 ──
+        #   dashboard 可能在插件加载后稍后初始化,此时路由尚未挂载。
+        #   首次工具调用时再尝试一次;若仍未就绪则 fail fast,避免前端
+        #   永远无法通过 REST 提交选择而导致异步 Future 无限阻塞。
+        if not _mount_api_router():
+            registry.remove(request_id)
+            return (
+                "Error: interactive choice REST endpoint is not available. "
+                "Dashboard may not be fully initialized. "
+                "Please try again later."
+            )
 
         # ── 6. 推送 interactive_choice 事件给前端 ──
         try:
@@ -213,6 +240,7 @@ class AskUserChoiceTool(FunctionTool):
                 umo=umo,
                 spec=spec,
                 expires_at=expires_at,
+                sse_message_id=sse_message_id,
             )
         except Exception as exc:
             registry.remove(request_id)
@@ -230,10 +258,11 @@ class AskUserChoiceTool(FunctionTool):
 
         # ── 8. 推 resolved 广播(失败不影响主流程) ──
         try:
-            await self._push_resolved_to_back_queue(
+            await _push_resolved_event_to_back_queue(
                 request_id=request_id,
                 umo=umo,
                 reason="submitted",
+                sse_message_id=sse_message_id,
             )
         except Exception:
             pass
@@ -247,14 +276,18 @@ class AskUserChoiceTool(FunctionTool):
         umo: str,
         spec: dict,
         expires_at: float,
+        sse_message_id: str,
     ) -> None:
         """推 interactive_choice 事件到 webchat SSE 流。
 
         Args:
-            request_id: 本次交互请求的唯一 ID。
+            request_id: 本次交互请求的唯一 ID(用于前端 REST resolve API)。
             umo: unified_msg_origin,例如 webchat:FriendMessage:webchat!alice!sess。
             spec: _validate_and_build_spec 输出的 spec dict。
             expires_at: Unix 时间戳,前端用来倒计时。
+            sse_message_id: 触发本次工具调用的 webchat event 的 message_id,
+                等于 chat_service 创建 SSE 流时生成的 uuid。必须用它当 back_queue
+                key,chat_service 才会 poll 到事件(详见 call() 步骤 1.5 的注释)。
         """
         # uses module-level import (Plan Amendment B) so tests can monkeypatch
         parts = umo.split(":", 2)
@@ -265,7 +298,7 @@ class AskUserChoiceTool(FunctionTool):
         conversation_id = chunks[-1] if len(chunks) >= 3 else session_key
 
         back_queue = webchat_queue_mgr.get_or_create_back_queue(
-            request_id=request_id,
+            request_id=sse_message_id,
             conversation_id=conversation_id,
         )
         await back_queue.put(
@@ -277,7 +310,7 @@ class AskUserChoiceTool(FunctionTool):
                     "expires_at": expires_at,
                     "umo": umo,
                 },
-                "message_id": request_id,
+                "message_id": sse_message_id,
             }
         )
 
@@ -286,6 +319,7 @@ class AskUserChoiceTool(FunctionTool):
         request_id: str,
         umo: str,
         reason: str,
+        sse_message_id: str,
     ) -> None:
         """推 interactive_choice_resolved 事件给所有 SSE 订阅者。
 
@@ -293,6 +327,8 @@ class AskUserChoiceTool(FunctionTool):
             request_id: 本次交互请求的唯一 ID。
             umo: unified_msg_origin,用于解析 conversation_id。
             reason: 解决原因(如 submitted / cancelled)。
+            sse_message_id: 同 _push_to_webchat_back_queue,作为 back_queue key
+                和 message_id 字段,保证 chat_service poll 得到。
         """
         parts = umo.split(":", 2)
         if len(parts) < 3:
@@ -302,18 +338,18 @@ class AskUserChoiceTool(FunctionTool):
         conversation_id = chunks[-1] if len(chunks) >= 3 else session_key
 
         back_queue = webchat_queue_mgr.get_or_create_back_queue(
-            request_id=request_id,
+            request_id=sse_message_id,
             conversation_id=conversation_id,
         )
         await back_queue.put(
             {
                 "type": "interactive_choice_resolved",
                 "data": {"request_id": request_id, "reason": reason},
-                "message_id": request_id,
+                "message_id": sse_message_id,
             }
         )
 
-    def _load_tool_config(self, context: "ContextWrapper") -> dict:
+    def _load_tool_config(self, context: ContextWrapper) -> dict:
         """从插件 config 读配置。无法获取时返回空 dict(走默认值)。
 
         Args:

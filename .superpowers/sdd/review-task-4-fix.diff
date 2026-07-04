@@ -1,0 +1,62 @@
+# Review package (re-review): HEAD~2..HEAD (Task 4 + Fix)
+
+## Commits
+0eef6af fix(registry): pin dev-deps and document _ensure_gc coupling
+b43a863 feat(registry): add stats and shutdown
+
+## Files changed
+ interactive_choice_registry.py            | 41 +++++++++++++++++++++++++++++++
+ requirements-dev.txt                      | 13 ++++++++++
+ tests/test_interactive_choice_registry.py | 26 ++++++++++++++++++++
+ 3 files changed, 80 insertions(+)
+
+## Diff (last commit only — the fix)
+diff --git a/interactive_choice_registry.py b/interactive_choice_registry.py
+index 621070c..9866827 100644
+--- a/interactive_choice_registry.py
++++ b/interactive_choice_registry.py
+@@ -118,21 +118,23 @@ class InteractiveChoiceRegistry:
+ 
+     def stats(self) -> dict:
+         """当前状态(用于调试/metrics)。"""
+         return {
+             "total_pending": len(self._pending),
+             "by_umo": {umo: len(ids) for umo, ids in self._by_umo.items()},
+         }
+ 
+     def _ensure_gc(self) -> None:
+         """确保 GC task 在运行(单例一次)。"""
+-        # 完整实现在 PR 2 集成阶段,这里占位避免破坏 add() 调用
++        # TODO(PR 2): Start _gc_loop as a background task here, store as self._gc_task.
++        # When filled in, update InteractiveChoiceRegistry.shutdown() to also
++        # cancel self._gc_task (currently only iterates _pending).
+         pass
+ 
+     async def _gc_loop(self) -> None:
+         """每 30s 扫描一次,清理已超时 / 已 done 的条目。"""
+         while True:
+             try:
+                 await asyncio.sleep(30)
+             except asyncio.CancelledError:
+                 return
+             now = time.time()
+diff --git a/requirements-dev.txt b/requirements-dev.txt
+new file mode 100644
+index 0000000..8f772d3
+--- /dev/null
++++ b/requirements-dev.txt
+@@ -0,0 +1,13 @@
++# Author: task4_fix
++# Date: 2026-07-02
++#
++# 开发依赖 (用于 pytest 测试套件)。
++# 运行插件本身只需要 astrbot (见 requirements.txt);
++# 以下包仅用于本地测试 / CI。
++#
++# Version policy: 使用 >= 锁大版本,允许补丁/小版本升级。
++# 这些版本由 Task 4 的 implementer 安装并验证可用。
++pytest>=9.1.1
++pytest-asyncio>=1.4.0
++pluggy>=1.6.0
++typing-extensions>=4.16.0
+\ No newline at end of file

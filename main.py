@@ -19,49 +19,13 @@ Date: 2026-07-03 (v1.0 重构)
 from __future__ import annotations
 
 from astrbot.api import logger, star
+from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Star
 from astrbot.core.config import AstrBotConfig
 
+from .api_mount import _mount_api_router, _push_resolved_event_to_back_queue
 from .ask_user_choice_tool import AskUserChoiceTool
-from .interactive_choice_api import router as api_router
 from .interactive_choice_registry import registry
-
-
-def _mount_api_router() -> bool:
-    """把 :data:`api_router` 挂载到 dashboard FastAPI app。
-
-    Returns:
-        True if mount succeeded; False if dashboard 尚未初始化或挂载失败
-        (退化模式:工具仍可工作,只是前端无法手动提交选择)。
-
-    Implementation notes (Plan Amendment A):
-        AstrBot 的 :class:`FastAPIAppAdapter` 只暴露 Flask 风格的
-        ``add_url_rule``;本插件调用 ``include_router`` 时必须穿透到底层
-        FastAPI 实例(``APP._app``,私有 API)。这是 dashboard 内部挂载
-        ``build_api_router()`` 时用的同款手法,目前 AstrBot 没有公开的
-        ``add_api_router`` 等价方法。
-    """
-    try:
-        from astrbot.dashboard.server import APP
-
-        if APP is None:
-            logger.warning(
-                "ask_user_choice: dashboard APP 尚未初始化,REST 端点未挂载",
-            )
-            return False
-        underlying = getattr(APP, "_app", None)
-        if underlying is None:
-            logger.warning(
-                "ask_user_choice: dashboard APP 缺少 _app 属性,REST 端点未挂载",
-            )
-            return False
-        underlying.include_router(api_router)
-    except Exception as exc:  # noqa: BLE001 - 任何挂载异常都降级为 warn
-        logger.warning(f"ask_user_choice: REST 端点挂载失败 ({exc})")
-        return False
-    else:
-        logger.info("ask_user_choice: REST 端点已挂载到 dashboard app")
-        return True
 
 
 class AskUserChoicePlugin(Star):
@@ -106,6 +70,52 @@ class AskUserChoicePlugin(Star):
         """插件关闭:清空 Registry 中的所有 pending future。"""
         await registry.shutdown()
         logger.info("ask_user_choice: Registry 已关闭")
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.ALL, priority=10)
+    async def on_message(self, event: AstrMessageEvent) -> None:
+        """拦截消息事件:若 UMO 有 pending interactive choice,消费消息作为 free text。
+
+        场景:用户没有点击选项框,而是直接输入文字消息。该消息应作为
+        ``ask_user_choice`` 工具的结果而不是触发新的 LLM 请求。
+
+        优先级设为 10 以确保在 builtin handler 之前执行。
+        """
+        umo = event.unified_msg_origin
+        if not umo.startswith("webchat:"):
+            return
+
+        pending = registry.find_pending_by_umo(umo)
+        if pending is None:
+            return
+
+        message_text = (event.message_str or "").strip()
+        if not message_text:
+            return
+
+        logger.info(
+            f"ask_user_choice: 消费消息 '{message_text[:60]}' "
+            f"作为会话 {umo[:80]} 的 pending choice 响应"
+        )
+
+        registry.resolve(
+            pending.request_id,
+            {"choice_id": "__free_text__", "free_text": message_text},
+        )
+
+        # 推 SSE resolved 事件,让前端关闭选项框
+        try:
+            await _push_resolved_event_to_back_queue(
+                request_id=pending.request_id,
+                umo=umo,
+                reason="submitted",
+                sse_message_id=pending.sse_message_id,
+            )
+        except Exception:
+            pass
+
+        # 阻止默认 LLM 请求 + 终止事件传播(消息已被消费)
+        event.should_call_llm(False)
+        event.stop_event()
 
 
 __all__ = ["AskUserChoicePlugin"]

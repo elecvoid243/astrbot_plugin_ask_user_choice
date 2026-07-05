@@ -1,15 +1,16 @@
 """AskUserChoiceTool 单元测试。"""
 
 import asyncio
+import json
 from unittest.mock import MagicMock
 
 import pytest
 
 from astrbot_plugin_ask_user_choice.ask_user_choice_tool import (
-    AskUserChoiceTool,
-    _PROMPT_MAX,
     _LABEL_MAX,
     _OPTIONS_MAX,
+    _PROMPT_MAX,
+    AskUserChoiceTool,
 )
 from astrbot_plugin_ask_user_choice.interactive_choice_registry import registry
 
@@ -364,19 +365,83 @@ async def test_call_pushes_event_to_sse_message_id_back_queue(monkeypatch):
     )
 
     # 3. 验证 payload 的 message_id 字段 == sse_message_id(让 chat_service filter 通过)
+    # v1.1 wire format: 事件走 `chain_type="interactive_choice"` 通道,
+    # 顶层 `type="plain"`,`data` 是 JSON 字符串(由 json.dumps 序列化)。
+    # chat_service 据此把 part 持久化进 bot 消息 parts 数组。
     choice_events = []
     for cq in captured_queues:
         for item in cq["queue"].items:
-            if item.get("type") == "interactive_choice":
+            if item.get("chain_type") == "interactive_choice":
                 choice_events.append(item)
     assert len(choice_events) == 1
+    assert choice_events[0]["type"] == "plain"
+    assert choice_events[0]["chain_type"] == "interactive_choice"
     assert choice_events[0]["message_id"] == SSE_MSG_ID
-    # payload.data 里仍保留 request_id,给前端 REST resolve 用
-    assert choice_events[0]["data"]["request_id"] in registry._pending or isinstance(
-        choice_events[0]["data"]["request_id"], str
+    # data 是 JSON 字符串,解析后取出 request_id (给前端 REST resolve 用)
+    parsed_data = json.loads(choice_events[0]["data"])
+    assert parsed_data["request_id"] in registry._pending or isinstance(
+        parsed_data["request_id"], str
     )
+    assert parsed_data["spec"]["type"] == "interactive_choice"
+    assert parsed_data["spec"]["prompt"] == "Pick one"
 
     assert "User selected" in result
+
+
+# ── v1.1 wire format 单元测试 ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_push_to_webchat_back_queue_uses_chain_type_envelope(
+    monkeypatch,
+):
+    """v1.1 改动:_push_to_webchat_back_queue 把事件改走通用 chain_type
+    通道(``type=plain`` + ``chain_type=interactive_choice`` + JSON 字符串
+    data),让 chat_service.BotMessageAccumulator 把它持久化进 bot 消息
+    parts。旧 wire(``type=interactive_choice`` + dict data)不再被发送。
+    """
+    tool = AskUserChoiceTool()
+    captured: dict = {}
+
+    class _FakeBackQueue:
+        def __init__(self):
+            self.items: list = []
+
+        async def put(self, item):
+            captured["item"] = item
+
+    monkeypatch.setattr(
+        "astrbot_plugin_ask_user_choice.ask_user_choice_tool.webchat_queue_mgr.get_or_create_back_queue",
+        lambda **kwargs: _FakeBackQueue(),
+    )
+
+    spec = {
+        "type": "interactive_choice",
+        "prompt": "Pick one",
+        "options": [{"id": "A", "label": "alpha"}],
+    }
+    await tool._push_to_webchat_back_queue(
+        request_id="req-uuid",
+        umo="webchat:FriendMessage:webchat!alice!sess",
+        spec=spec,
+        expires_at=1700000000.0,
+        sse_message_id="sse-stream-uuid",
+    )
+
+    item = captured["item"]
+    # 顶层是 plain + chain_type envelope
+    assert item["type"] == "plain"
+    assert item["chain_type"] == "interactive_choice"
+    assert item["message_id"] == "sse-stream-uuid"
+    # data 必须是 JSON 字符串(chat_service 期望)
+    assert isinstance(item["data"], str)
+    parsed = json.loads(item["data"])
+    assert parsed["request_id"] == "req-uuid"
+    assert parsed["spec"] == spec
+    assert parsed["expires_at"] == 1700000000.0
+
+
+# ── 缺失 sse_message_id 校验(老测试保留)───────────────────────
 
 
 @pytest.mark.asyncio

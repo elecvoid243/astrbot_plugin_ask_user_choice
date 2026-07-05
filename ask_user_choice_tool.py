@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -288,6 +289,21 @@ class AskUserChoiceTool(FunctionTool):
             sse_message_id: 触发本次工具调用的 webchat event 的 message_id,
                 等于 chat_service 创建 SSE 流时生成的 uuid。必须用它当 back_queue
                 key,chat_service 才会 poll 到事件(详见 call() 步骤 1.5 的注释)。
+
+        Wire format (v1.1)::
+
+            {
+                "type": "plain",                 # 走通用 SSE 通道
+                "chain_type": "interactive_choice",  # chat_service 据此持久化 part
+                "data": "<json string>",         # chat_service 期望 string
+                "message_id": sse_message_id,
+            }
+
+        v1.0 旧 wire format 使用 ``type: "interactive_choice"`` + dict data。
+        新版改走 chain_type 通道,是为了让 chat_service 的
+        ``BotMessageAccumulator`` 把它持久化进 bot 消息的 parts
+        数组(否则 hard refresh 后 box 会丢失或被 orphan-injection
+        全部塞到页底)。前后端需要同步发布。
         """
         # uses module-level import (Plan Amendment B) so tests can monkeypatch
         parts = umo.split(":", 2)
@@ -303,13 +319,17 @@ class AskUserChoiceTool(FunctionTool):
         )
         await back_queue.put(
             {
-                "type": "interactive_choice",
-                "data": {
-                    "request_id": request_id,
-                    "spec": spec,
-                    "expires_at": expires_at,
-                    "umo": umo,
-                },
+                "type": "plain",
+                "chain_type": "interactive_choice",
+                "data": json.dumps(
+                    {
+                        "request_id": request_id,
+                        "spec": spec,
+                        "expires_at": expires_at,
+                        "umo": umo,
+                    },
+                    ensure_ascii=False,
+                ),
                 "message_id": sse_message_id,
             }
         )

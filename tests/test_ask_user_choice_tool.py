@@ -110,6 +110,8 @@ def test_validate_returns_dict_on_valid_input():
     assert result["prompt"] == "test"
     assert result["type"] == "interactive_choice"
     assert len(result["options"]) == 2
+    # v1.1: 未传 extra_content → 不进 spec(向后兼容)
+    assert "extra_content" not in result
 
 
 def test_validate_truncates_long_prompt():
@@ -503,3 +505,198 @@ async def test_call_fails_fast_when_mount_returns_false(monkeypatch):
     assert len(registry._pending) == 0
     # 不应推任何事件
     mock_mgr.get_or_create_back_queue.assert_not_called()
+
+
+# ── v1.1 extra_content 单测 ────────────────────────────────────────
+
+
+def test_validate_includes_extra_content_when_provided():
+    """提供非空 extra_content 时,spec 应包含原样内容(经 strip)。"""
+    tool = AskUserChoiceTool()
+    result = tool._validate_and_build_spec(
+        {
+            "prompt": "test",
+            "options": [{"id": "A", "label": "a"}, {"id": "B", "label": "b"}],
+            "extra_content": "**推荐 B**\n\n理由:便宜",
+        }
+    )
+    assert isinstance(result, dict)
+    assert result["extra_content"] == "**推荐 B**\n\n理由:便宜"
+
+
+def test_validate_omits_extra_content_when_empty_or_none():
+    """空 / None / 纯空白 / 缺省 → spec 不含该 key。"""
+    tool = AskUserChoiceTool()
+    base = {
+        "prompt": "test",
+        "options": [{"id": "A", "label": "a"}, {"id": "B", "label": "b"}],
+    }
+    for missing in [None, "", "   ", "\n\t  "]:
+        result = tool._validate_and_build_spec({**base, "extra_content": missing})
+        assert isinstance(result, dict), f"extra_content={missing!r} should be valid"
+        assert "extra_content" not in result, (
+            f"extra_content={missing!r} should be omitted, got {result!r}"
+        )
+
+    # 完全不传该参数
+    result = tool._validate_and_build_spec(base)
+    assert "extra_content" not in result
+
+
+def test_validate_truncates_long_extra_content():
+    """长度 > _EXTRA_CONTENT_MAX → 截断到上限。"""
+    from astrbot_plugin_ask_user_choice.ask_user_choice_tool import _EXTRA_CONTENT_MAX
+
+    tool = AskUserChoiceTool()
+    long_text = "x" * (_EXTRA_CONTENT_MAX + 100)
+    result = tool._validate_and_build_spec(
+        {
+            "prompt": "test",
+            "options": [{"id": "A", "label": "a"}, {"id": "B", "label": "b"}],
+            "extra_content": long_text,
+        }
+    )
+    assert isinstance(result, dict)
+    assert len(result["extra_content"]) == _EXTRA_CONTENT_MAX
+
+
+def test_validate_extra_content_strips_whitespace():
+    """首尾空白被 .strip() 去除。"""
+    tool = AskUserChoiceTool()
+    result = tool._validate_and_build_spec(
+        {
+            "prompt": "test",
+            "options": [{"id": "A", "label": "a"}, {"id": "B", "label": "b"}],
+            "extra_content": "  hello world  \n",
+        }
+    )
+    assert isinstance(result, dict)
+    assert result["extra_content"] == "hello world"
+
+
+def test_validate_non_string_extra_content_is_coerced_to_string():
+    """非字符串输入 → str() 强转(spec §3.3);转换后非空则入 spec。
+
+    spec §3.3 明确:只有 "转换后为空" 才不进 spec。``str(42).strip() == '42'``、
+    ``str(0).strip() == '0'`` 都是非空,所以应该入 spec。``None`` 由
+    ``if extra is not None`` 短路在前,不进 spec。
+    """
+    tool = AskUserChoiceTool()
+
+    # 数字 → 字符串(spec §3.3 的标准 str 强转路径)
+    result = tool._validate_and_build_spec(
+        {
+            "prompt": "test",
+            "options": [{"id": "A", "label": "a"}, {"id": "B", "label": "b"}],
+            "extra_content": 42,
+        }
+    )
+    assert isinstance(result, dict)
+    assert result["extra_content"] == "42"
+
+    # None 由顶部 `if extra is not None` 短路 → 不进 spec
+    result = tool._validate_and_build_spec(
+        {
+            "prompt": "test",
+            "options": [{"id": "A", "label": "a"}, {"id": "B", "label": "b"}],
+            "extra_content": None,
+        }
+    )
+    assert isinstance(result, dict)
+    assert "extra_content" not in result
+
+
+# ── v1.1 extra_content SSE 透传回归 ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_call_propagates_extra_content_to_sse_payload(monkeypatch):
+    """extra_content 应在 SSE data 字段的 JSON 序列化中完整保留,
+    前端解析 spec 时能拿到原值(仅 .strip() + 截断,不做其他转义)。
+
+    本测试是数据流层的回归保险,Task 1 的 5 个单测只覆盖了
+    ``_validate_and_build_spec`` 这一个纯函数;本测试验证
+    ``call() → _push_to_webchat_back_queue → JSON 字符串`` 全链路。
+    """
+    SSE_MSG_ID = "stream-msg-extra-content"
+    ctx = _make_context(sse_message_id=SSE_MSG_ID)
+
+    captured_queues: list = []
+
+    class _FakeBackQueue:
+        def __init__(self, request_id):
+            self.request_id = request_id
+            self.items: list = []
+
+        async def put(self, item):
+            self.items.append(item)
+
+    class _FakeMgr:
+        @staticmethod
+        def get_or_create_back_queue(request_id, **_):
+            q = _FakeBackQueue(request_id)
+            captured_queues.append({"request_id": request_id, "queue": q})
+            return q
+
+    monkeypatch.setattr(
+        "astrbot_plugin_ask_user_choice.ask_user_choice_tool.webchat_queue_mgr",
+        _FakeMgr(),
+        raising=False,
+    )
+
+    tool = AskUserChoiceTool()
+    monkeypatch.setattr(
+        tool,
+        "_load_tool_config",
+        lambda ctx: {"timeout_seconds": 2, "max_concurrent_pending": 32},
+    )
+
+    # Markdown 内容含 * / / ** / 反引号 / 中文(确保 utf-8 编码路径安全)
+    extra_md = (
+        "**推荐 B**。\n\n"
+        "理由:\n"
+        "- 兼顾成本与风险\n"
+        "- LB 已就绪\n\n"
+        "**注意**: 灰度比例建议从 5% 起步,见 `kubectl rollout` docs"
+    )
+
+    async def resolve_after_push():
+        await asyncio.sleep(0.05)
+        rid = next(iter(registry._pending.keys()), None)
+        if rid:
+            registry.resolve(rid, {"choice_id": "A", "free_text": ""})
+
+    call_task = asyncio.create_task(
+        tool.call(
+            ctx,
+            prompt="Pick a deploy plan",
+            options=[{"id": "A", "label": "蓝绿"}, {"id": "B", "label": "灰度"}],
+            extra_content=extra_md,
+        )
+    )
+    resolver = asyncio.create_task(resolve_after_push())
+    result = await asyncio.wait_for(call_task, timeout=3.0)
+    await resolver
+
+    # 抓出 interactive_choice 事件
+    choice_events = []
+    for cq in captured_queues:
+        for item in cq["queue"].items:
+            if item.get("chain_type") == "interactive_choice":
+                choice_events.append(item)
+    assert len(choice_events) == 1, (
+        f"expected exactly 1 interactive_choice event, got {len(choice_events)}"
+    )
+
+    # data 是 JSON 字符串(chat_service 期望)
+    assert isinstance(choice_events[0]["data"], str)
+    parsed = json.loads(choice_events[0]["data"])
+
+    # 关键断言:spec.extra_content 完整保留(经过 json.dumps + json.loads 仍是原值)
+    assert "spec" in parsed
+    assert "extra_content" in parsed["spec"], (
+        f"expected extra_content in spec, got keys: {list(parsed['spec'].keys())}"
+    )
+    assert parsed["spec"]["extra_content"] == extra_md
+
+    assert "User selected" in result

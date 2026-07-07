@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from astrbot.api import FunctionTool
+from astrbot.api import FunctionTool, logger
 
 # lifted to module top per Plan Amendment B so tests can monkeypatch this binding
 from astrbot.core.platform.sources.webchat.webchat_queue_mgr import webchat_queue_mgr
@@ -31,6 +31,7 @@ _TITLE_MAX = 30
 _LABEL_MAX = 30
 _DESCRIPTION_MAX = 200
 _INPUT_PLACEHOLDER_MAX = 60
+_EXTRA_CONTENT_MAX = 5000   # v1.1: 补充说明(Markdown)字符上限
 _OPTIONS_MIN = 2
 _OPTIONS_MAX = 10
 
@@ -44,7 +45,10 @@ class AskUserChoiceTool(FunctionTool):
         "Present the user with a question and a set of options to choose from. "
         "Use this when you need the user to make a decision before you can proceed. "
         "This tool blocks until the user responds, then returns their choice. "
-        "The user's response is returned directly as this tool's result."
+        "The user's response is returned directly as this tool's result. "
+        "If you want to show analysis, a recommended pick, reasoning, caveats, "
+        "or pros/cons of the options, pass them via `extra_content`. "
+        "The frontend renders it as Markdown."
     )
     parameters: dict = field(
         default_factory=lambda: {
@@ -84,6 +88,16 @@ class AskUserChoiceTool(FunctionTool):
                 "input_placeholder": {
                     "type": "string",
                     "description": "Free-text input placeholder",
+                },
+                "extra_content": {
+                    "type": "string",
+                    "description": (
+                        "Optional supplementary text shown to the user next to the options. "
+                        "Use it for your recommended pick, reasoning, caveats, "
+                        "or side-by-side pros/cons of the options. "
+                        "The frontend renders it as Markdown (lists, code blocks, links all work). "
+                        "The text is NOT echoed back in the tool result — the user already sees it."
+                    ),
                 },
             },
             "required": ["prompt", "options"],
@@ -144,6 +158,19 @@ class AskUserChoiceTool(FunctionTool):
         placeholder = kwargs.get("input_placeholder")
         if placeholder and placeholder.strip():
             spec["input_placeholder"] = placeholder.strip()[:_INPUT_PLACEHOLDER_MAX]
+
+        # v1.1: 补充说明字段(Markdown 文本,前端渲染)
+        extra = kwargs.get("extra_content")
+        if extra is not None:
+            extra_str = str(extra).strip()
+            if extra_str:
+                if len(extra_str) > _EXTRA_CONTENT_MAX:
+                    logger.warning(
+                        f"ask_user_choice: extra_content 截断 "
+                        f"({len(extra_str)} -> {_EXTRA_CONTENT_MAX} 字符)"
+                    )
+                    extra_str = extra_str[:_EXTRA_CONTENT_MAX]
+                spec["extra_content"] = extra_str
         return spec
 
     async def call(self, context: ContextWrapper, **kwargs: Any) -> str:

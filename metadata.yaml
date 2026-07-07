@@ -1,6 +1,7 @@
 # Author: elecvoid243
 # Date: 2026-06-30
 # Spec: docs/superpowers/specs/2026-06-28-dynamic-choice-box-rendering-design.md §5.3 + §11
+# v1.1 spec 增量: docs/superpowers/specs/2026-07-07-extra-content-field-amendment.md
 #
 # AstrBot 插件元数据。name 字段必须与目录名一致(以便 AstrBot 在 plugins/
 # 扫描时识别),version 字段遵循 vMAJOR.MINOR.PATCH 语义化版本约定。
@@ -15,10 +16,16 @@
 #   - 工具 call() 内 await 用户选择,完成后直接返回结果给 LLM(不再是新
 #     user message),跨 dashboard 刷新持久化。
 #   - Spec: docs/superpowers/specs/2026-07-02-blocking-interactive-choice-design.md
+#
+# v1.1.0 (2026-07-07): extra_content 字段(加性变更)
+#   - 工具参数新增可选 `extra_content`(string,≤5000 字符),用于承载
+#     LLM 给用户看的推荐/理由/注意事项/优缺点对比等补充文本,前端按
+#     Markdown 渲染。不回传到 tool result(避免 LLM 复读)。
+#   - Spec: docs/superpowers/specs/2026-07-07-extra-content-field-amendment.md
 name: astrbot_plugin_ask_user
 display_name: Ask User Choice
-desc: 让 LLM 通过 ask_user_choice 工具向用户呈现可交互选项框（单选 + 自由输入）。v1.0 升级为真阻塞式:工具 await 用户选择,完成后直接返回结果,跨刷新持久化。
-version: v1.0.0
+desc: 让 LLM 通过 ask_user_choice 工具向用户呈现可交互选项框（单选 + 自由输入）。v1.0 升级为真阻塞式:工具 await 用户选择,完成后直接返回结果,跨刷新持久化。v1.1 新增 `extra_content` 字段,支持 Markdown 补充说明(推荐/理由/注意事项/优缺点对比)。
+version: v1.1.0
 author: elecvoid243
 repo: https://github.com/elecvoid243/astrbot_plugin_ask_user
 astrbot_version: ">=4.16,<5"

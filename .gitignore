@@ -35,3 +35,6 @@ Thumbs.db
 data/
 config/
 *.log
+
+# Git worktree 隔离工作区
+.worktrees/

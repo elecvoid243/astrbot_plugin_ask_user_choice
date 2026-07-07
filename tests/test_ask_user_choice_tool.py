@@ -604,3 +604,99 @@ def test_validate_non_string_extra_content_is_coerced_to_string():
     )
     assert isinstance(result, dict)
     assert "extra_content" not in result
+
+
+# ── v1.1 extra_content SSE 透传回归 ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_call_propagates_extra_content_to_sse_payload(monkeypatch):
+    """extra_content 应在 SSE data 字段的 JSON 序列化中完整保留,
+    前端解析 spec 时能拿到原值(仅 .strip() + 截断,不做其他转义)。
+
+    本测试是数据流层的回归保险,Task 1 的 5 个单测只覆盖了
+    ``_validate_and_build_spec`` 这一个纯函数;本测试验证
+    ``call() → _push_to_webchat_back_queue → JSON 字符串`` 全链路。
+    """
+    SSE_MSG_ID = "stream-msg-extra-content"
+    ctx = _make_context(sse_message_id=SSE_MSG_ID)
+
+    captured_queues: list = []
+
+    class _FakeBackQueue:
+        def __init__(self, request_id):
+            self.request_id = request_id
+            self.items: list = []
+
+        async def put(self, item):
+            self.items.append(item)
+
+    class _FakeMgr:
+        @staticmethod
+        def get_or_create_back_queue(request_id, **_):
+            q = _FakeBackQueue(request_id)
+            captured_queues.append({"request_id": request_id, "queue": q})
+            return q
+
+    monkeypatch.setattr(
+        "astrbot_plugin_ask_user_choice.ask_user_choice_tool.webchat_queue_mgr",
+        _FakeMgr(),
+        raising=False,
+    )
+
+    tool = AskUserChoiceTool()
+    monkeypatch.setattr(
+        tool,
+        "_load_tool_config",
+        lambda ctx: {"timeout_seconds": 2, "max_concurrent_pending": 32},
+    )
+
+    # Markdown 内容含 * / / ** / 反引号 / 中文(确保 utf-8 编码路径安全)
+    extra_md = (
+        "**推荐 B**。\n\n"
+        "理由:\n"
+        "- 兼顾成本与风险\n"
+        "- LB 已就绪\n\n"
+        "**注意**: 灰度比例建议从 5% 起步,见 `kubectl rollout` docs"
+    )
+
+    async def resolve_after_push():
+        await asyncio.sleep(0.05)
+        rid = next(iter(registry._pending.keys()), None)
+        if rid:
+            registry.resolve(rid, {"choice_id": "A", "free_text": ""})
+
+    call_task = asyncio.create_task(
+        tool.call(
+            ctx,
+            prompt="Pick a deploy plan",
+            options=[{"id": "A", "label": "蓝绿"}, {"id": "B", "label": "灰度"}],
+            extra_content=extra_md,
+        )
+    )
+    resolver = asyncio.create_task(resolve_after_push())
+    result = await asyncio.wait_for(call_task, timeout=3.0)
+    await resolver
+
+    # 抓出 interactive_choice 事件
+    choice_events = []
+    for cq in captured_queues:
+        for item in cq["queue"].items:
+            if item.get("chain_type") == "interactive_choice":
+                choice_events.append(item)
+    assert len(choice_events) == 1, (
+        f"expected exactly 1 interactive_choice event, got {len(choice_events)}"
+    )
+
+    # data 是 JSON 字符串(chat_service 期望)
+    assert isinstance(choice_events[0]["data"], str)
+    parsed = json.loads(choice_events[0]["data"])
+
+    # 关键断言:spec.extra_content 完整保留(经过 json.dumps + json.loads 仍是原值)
+    assert "spec" in parsed
+    assert "extra_content" in parsed["spec"], (
+        f"expected extra_content in spec, got keys: {list(parsed['spec'].keys())}"
+    )
+    assert parsed["spec"]["extra_content"] == extra_md
+
+    assert "User selected" in result

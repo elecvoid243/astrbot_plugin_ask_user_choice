@@ -110,6 +110,8 @@ def test_validate_returns_dict_on_valid_input():
     assert result["prompt"] == "test"
     assert result["type"] == "interactive_choice"
     assert len(result["options"]) == 2
+    # v1.1: 未传 extra_content → 不进 spec(向后兼容)
+    assert "extra_content" not in result
 
 
 def test_validate_truncates_long_prompt():
@@ -503,3 +505,102 @@ async def test_call_fails_fast_when_mount_returns_false(monkeypatch):
     assert len(registry._pending) == 0
     # 不应推任何事件
     mock_mgr.get_or_create_back_queue.assert_not_called()
+
+
+# ── v1.1 extra_content 单测 ────────────────────────────────────────
+
+
+def test_validate_includes_extra_content_when_provided():
+    """提供非空 extra_content 时,spec 应包含原样内容(经 strip)。"""
+    tool = AskUserChoiceTool()
+    result = tool._validate_and_build_spec(
+        {
+            "prompt": "test",
+            "options": [{"id": "A", "label": "a"}, {"id": "B", "label": "b"}],
+            "extra_content": "**推荐 B**\n\n理由:便宜",
+        }
+    )
+    assert isinstance(result, dict)
+    assert result["extra_content"] == "**推荐 B**\n\n理由:便宜"
+
+
+def test_validate_omits_extra_content_when_empty_or_none():
+    """空 / None / 纯空白 / 缺省 → spec 不含该 key。"""
+    tool = AskUserChoiceTool()
+    base = {
+        "prompt": "test",
+        "options": [{"id": "A", "label": "a"}, {"id": "B", "label": "b"}],
+    }
+    for missing in [None, "", "   ", "\n\t  "]:
+        result = tool._validate_and_build_spec({**base, "extra_content": missing})
+        assert isinstance(result, dict), f"extra_content={missing!r} should be valid"
+        assert "extra_content" not in result, (
+            f"extra_content={missing!r} should be omitted, got {result!r}"
+        )
+
+    # 完全不传该参数
+    result = tool._validate_and_build_spec(base)
+    assert "extra_content" not in result
+
+
+def test_validate_truncates_long_extra_content():
+    """长度 > _EXTRA_CONTENT_MAX → 截断到上限。"""
+    from astrbot_plugin_ask_user_choice.ask_user_choice_tool import _EXTRA_CONTENT_MAX
+
+    tool = AskUserChoiceTool()
+    long_text = "x" * (_EXTRA_CONTENT_MAX + 100)
+    result = tool._validate_and_build_spec(
+        {
+            "prompt": "test",
+            "options": [{"id": "A", "label": "a"}, {"id": "B", "label": "b"}],
+            "extra_content": long_text,
+        }
+    )
+    assert isinstance(result, dict)
+    assert len(result["extra_content"]) == _EXTRA_CONTENT_MAX
+
+
+def test_validate_extra_content_strips_whitespace():
+    """首尾空白被 .strip() 去除。"""
+    tool = AskUserChoiceTool()
+    result = tool._validate_and_build_spec(
+        {
+            "prompt": "test",
+            "options": [{"id": "A", "label": "a"}, {"id": "B", "label": "b"}],
+            "extra_content": "  hello world  \n",
+        }
+    )
+    assert isinstance(result, dict)
+    assert result["extra_content"] == "hello world"
+
+
+def test_validate_non_string_extra_content_is_coerced_to_string():
+    """非字符串输入 → str() 强转(spec §3.3);转换后非空则入 spec。
+
+    spec §3.3 明确:只有 "转换后为空" 才不进 spec。``str(42).strip() == '42'``、
+    ``str(0).strip() == '0'`` 都是非空,所以应该入 spec。``None`` 由
+    ``if extra is not None`` 短路在前,不进 spec。
+    """
+    tool = AskUserChoiceTool()
+
+    # 数字 → 字符串(spec §3.3 的标准 str 强转路径)
+    result = tool._validate_and_build_spec(
+        {
+            "prompt": "test",
+            "options": [{"id": "A", "label": "a"}, {"id": "B", "label": "b"}],
+            "extra_content": 42,
+        }
+    )
+    assert isinstance(result, dict)
+    assert result["extra_content"] == "42"
+
+    # None 由顶部 `if extra is not None` 短路 → 不进 spec
+    result = tool._validate_and_build_spec(
+        {
+            "prompt": "test",
+            "options": [{"id": "A", "label": "a"}, {"id": "B", "label": "b"}],
+            "extra_content": None,
+        }
+    )
+    assert isinstance(result, dict)
+    assert "extra_content" not in result

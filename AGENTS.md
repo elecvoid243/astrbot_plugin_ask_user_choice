@@ -313,6 +313,8 @@ def __init__(self, context: star.Context, config: AstrBotConfig) -> None:
   2. 渲染"选项框"中间格式(由前端解析,具体协议见 spec)。
   3. 等待用户响应并以纯文本形式返回。
 - 与 `main.py` 通过**构造函数注入**,不要在工具内部 import `main`。
+- v1.1+ 工具参数含可选 `extra_content`(string,≤5000 字符,前端按 Markdown 渲染),
+  详见 `docs/superpowers/specs/2026-07-07-extra-content-field-amendment.md`。
 
 #### `requirements.txt`
 - 当前仅含 `astrbot>=4.16,<5`。

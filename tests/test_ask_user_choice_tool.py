@@ -700,3 +700,265 @@ async def test_call_propagates_extra_content_to_sse_payload(monkeypatch):
     assert parsed["spec"]["extra_content"] == extra_md
 
     assert "User selected" in result
+
+
+# ── v1.2 SSE cancelled-state push tests (Task B1) ──────────────────────
+
+
+class _FakeRegistry:
+    """Minimal stand-in for ``ask_user_choice_tool.registry`` used in B1 tests.
+
+    The tool's ``call()`` accesses ``registry.add``, ``registry.remove``, and
+    indirectly ``registry._pending`` (concurrency check). We only need no-op
+    behavior — the SSE push behavior is what these tests assert.
+    """
+
+    def __init__(self) -> None:
+        # Instance attribute so each test starts with a fresh empty bucket
+        # (avoids cross-test bleed if pytest reorders or parallelises).
+        self._pending: dict = {}
+
+    def add(self, **kwargs) -> None:  # noqa: ANN003
+        pass
+
+    def remove(self, request_id: str) -> None:  # noqa: ARG002
+        pass
+
+    def resolve(self, request_id: str, payload: dict) -> bool:  # noqa: ARG002
+        return True
+
+
+class TestAskUserChoiceToolCancelledSSE:
+    """v1.2: TimeoutError / CancelledError 分支必须推 SSE ``reason='cancelled'``。
+
+    触发 dashboard 把 box 翻成"已取消"非交互状态。Success path 仍必须推
+    ``reason='submitted'``,且 push 失败必须被吞掉(fallback_msg 照常返回)。
+    """
+
+    @pytest.mark.asyncio
+    async def test_call_pushes_cancelled_sse_on_timeout(self, monkeypatch) -> None:
+        """``asyncio.TimeoutError`` 分支必须推 ``reason='cancelled'`` 再返回 fallback。"""
+        from astrbot_plugin_ask_user_choice.ask_user_choice_tool import (
+            AskUserChoiceTool,
+        )
+
+        context = _make_context(
+            umo="webchat:FriendMessage:webchat!alice!sess",
+            sse_message_id="msg-1",
+        )
+        tool = AskUserChoiceTool()
+
+        push_calls: list[dict] = []
+
+        async def fake_push_resolved(**kwargs) -> None:
+            push_calls.append(kwargs)
+
+        async def fake_wait_for(_future, timeout):  # noqa: ANN001
+            raise asyncio.TimeoutError
+
+        monkeypatch.setattr(
+            tool,
+            "_load_tool_config",
+            lambda ctx: {
+                "timeout_seconds": 5,
+                "max_concurrent_pending": 32,
+            },
+        )
+        monkeypatch.setattr(
+            "astrbot_plugin_ask_user_choice.ask_user_choice_tool"
+            "._push_resolved_event_to_back_queue",
+            fake_push_resolved,
+        )
+        monkeypatch.setattr(
+            "astrbot_plugin_ask_user_choice.ask_user_choice_tool.asyncio.wait_for",
+            fake_wait_for,
+        )
+        monkeypatch.setattr(
+            "astrbot_plugin_ask_user_choice.ask_user_choice_tool.registry",
+            _FakeRegistry(),
+        )
+
+        result = await tool.call(
+            context,
+            prompt="x?",
+            options=[
+                {"id": "a", "label": "A"},
+                {"id": "b", "label": "B"},
+            ],
+        )
+
+        assert push_calls, "SSE push was not called on timeout"
+        assert push_calls[0]["reason"] == "cancelled"
+        assert push_calls[0]["request_id"]  # non-empty uuid
+        assert push_calls[0]["umo"] == "webchat:FriendMessage:webchat!alice!sess"
+        assert push_calls[0]["sse_message_id"] == "msg-1"
+        assert result.startswith("[User did not respond within")
+
+    @pytest.mark.asyncio
+    async def test_call_pushes_cancelled_sse_on_cancelled_error(
+        self, monkeypatch
+    ) -> None:
+        """``asyncio.CancelledError`` 分支也必须推 ``reason='cancelled'``。"""
+        from astrbot_plugin_ask_user_choice.ask_user_choice_tool import (
+            AskUserChoiceTool,
+        )
+
+        context = _make_context(
+            umo="webchat:FriendMessage:webchat!alice!sess",
+            sse_message_id="msg-1",
+        )
+        tool = AskUserChoiceTool()
+
+        push_calls: list[dict] = []
+
+        async def fake_push_resolved(**kwargs) -> None:
+            push_calls.append(kwargs)
+
+        async def fake_wait_for(_future, timeout):  # noqa: ANN001
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(
+            tool,
+            "_load_tool_config",
+            lambda ctx: {
+                "timeout_seconds": 5,
+                "max_concurrent_pending": 32,
+            },
+        )
+        monkeypatch.setattr(
+            "astrbot_plugin_ask_user_choice.ask_user_choice_tool"
+            "._push_resolved_event_to_back_queue",
+            fake_push_resolved,
+        )
+        monkeypatch.setattr(
+            "astrbot_plugin_ask_user_choice.ask_user_choice_tool.asyncio.wait_for",
+            fake_wait_for,
+        )
+        monkeypatch.setattr(
+            "astrbot_plugin_ask_user_choice.ask_user_choice_tool.registry",
+            _FakeRegistry(),
+        )
+
+        result = await tool.call(
+            context,
+            prompt="x?",
+            options=[
+                {"id": "a", "label": "A"},
+                {"id": "b", "label": "B"},
+            ],
+        )
+
+        assert push_calls, "SSE push was not called on cancel"
+        assert push_calls[0]["reason"] == "cancelled"
+        assert push_calls[0]["request_id"]  # non-empty uuid
+        assert result == "[User input was cancelled] STOP ALL ACTIONS right now."
+
+    @pytest.mark.asyncio
+    async def test_call_success_path_pushes_submitted_not_cancelled(
+        self, monkeypatch
+    ) -> None:
+        """Success 分支必须推 ``reason='submitted'``,**不能**误推 ``cancelled``。"""
+        from astrbot_plugin_ask_user_choice.ask_user_choice_tool import (
+            AskUserChoiceTool,
+        )
+
+        context = _make_context(
+            umo="webchat:FriendMessage:webchat!alice!sess",
+            sse_message_id="msg-1",
+        )
+        tool = AskUserChoiceTool()
+
+        push_calls: list[dict] = []
+
+        async def fake_push_resolved(**kwargs) -> None:
+            push_calls.append(kwargs)
+
+        async def fake_wait_for(_future, timeout):  # noqa: ANN001
+            return {"choice_id": "a", "free_text": ""}
+
+        monkeypatch.setattr(
+            tool,
+            "_load_tool_config",
+            lambda ctx: {
+                "timeout_seconds": 5,
+                "max_concurrent_pending": 32,
+            },
+        )
+        monkeypatch.setattr(
+            "astrbot_plugin_ask_user_choice.ask_user_choice_tool"
+            "._push_resolved_event_to_back_queue",
+            fake_push_resolved,
+        )
+        monkeypatch.setattr(
+            "astrbot_plugin_ask_user_choice.ask_user_choice_tool.asyncio.wait_for",
+            fake_wait_for,
+        )
+        monkeypatch.setattr(
+            "astrbot_plugin_ask_user_choice.ask_user_choice_tool.registry",
+            _FakeRegistry(),
+        )
+
+        await tool.call(
+            context,
+            prompt="x?",
+            options=[
+                {"id": "a", "label": "A"},
+                {"id": "b", "label": "B"},
+            ],
+        )
+
+        assert len(push_calls) == 1, f"expected one push, got {len(push_calls)}"
+        assert push_calls[0]["reason"] == "submitted"
+        assert push_calls[0]["reason"] != "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_call_swallows_push_failure_on_timeout(self, monkeypatch) -> None:
+        """Push 失败(RuntimeError)不能破坏 fallback_msg 返回。"""
+        from astrbot_plugin_ask_user_choice.ask_user_choice_tool import (
+            AskUserChoiceTool,
+        )
+
+        context = _make_context(
+            umo="webchat:FriendMessage:webchat!alice!sess",
+            sse_message_id="msg-1",
+        )
+        tool = AskUserChoiceTool()
+
+        async def fake_push_resolved(**kwargs) -> None:
+            raise RuntimeError("simulated back-queue outage")
+
+        async def fake_wait_for(_future, timeout):  # noqa: ANN001
+            raise asyncio.TimeoutError
+
+        monkeypatch.setattr(
+            tool,
+            "_load_tool_config",
+            lambda ctx: {
+                "timeout_seconds": 5,
+                "max_concurrent_pending": 32,
+            },
+        )
+        monkeypatch.setattr(
+            "astrbot_plugin_ask_user_choice.ask_user_choice_tool"
+            "._push_resolved_event_to_back_queue",
+            fake_push_resolved,
+        )
+        monkeypatch.setattr(
+            "astrbot_plugin_ask_user_choice.ask_user_choice_tool.asyncio.wait_for",
+            fake_wait_for,
+        )
+        monkeypatch.setattr(
+            "astrbot_plugin_ask_user_choice.ask_user_choice_tool.registry",
+            _FakeRegistry(),
+        )
+
+        result = await tool.call(
+            context,
+            prompt="x?",
+            options=[
+                {"id": "a", "label": "A"},
+                {"id": "b", "label": "B"},
+            ],
+        )
+
+        assert result.startswith("[User did not respond within")

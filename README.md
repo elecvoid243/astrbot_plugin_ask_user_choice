@@ -21,6 +21,11 @@ v1.0 起 `ask_user_choice` 工具在 `call()` 内 `await` 等待用户响应,当
 取消"文字)。LLM 可见的 tool result 字符串保持不变 —— 用户视角的"已结束"
 信号由前端状态机消费,LLM 仍按既有 `fallback_msg` / 取消字符串处理。
 
+**实现细节**:两次 SSE 推送都在 `call()` 对应 `except` 分支的 `return` 之前、
+`finally` 块之外执行,推送本身用 `try/except Exception: pass` 吞掉失败(与
+v1.0 success 路径的推送对齐),确保后端 back-queue 故障不会破坏 LLM 可见的
+`fallback_msg` / 取消字符串返回值。
+
 ## v1.0 真阻塞式 (2026-07-02+)
 
 `ask_user_choice` 工具在 v1.0 起改为真阻塞式:LLM 调用后,工具内部 `await`

@@ -31,7 +31,7 @@ _TITLE_MAX = 30
 _LABEL_MAX = 30
 _DESCRIPTION_MAX = 200
 _INPUT_PLACEHOLDER_MAX = 60
-_EXTRA_CONTENT_MAX = 5000   # v1.1: 补充说明(Markdown)字符上限
+_EXTRA_CONTENT_MAX = 5000  # v1.1: 补充说明(Markdown)字符上限
 _OPTIONS_MIN = 2
 _OPTIONS_MAX = 10
 
@@ -278,9 +278,30 @@ class AskUserChoiceTool(FunctionTool):
         try:
             user_choice = await asyncio.wait_for(future, timeout=timeout_s)
         except asyncio.TimeoutError:
+            # v1.2: 推 cancelled 事件让 dashboard 把 box 翻成"已取消"。
+            # Push 失败吞掉(与 success 分支一致),保证 fallback_msg 照常返回。
+            try:
+                await _push_resolved_event_to_back_queue(
+                    request_id=request_id,
+                    umo=umo,
+                    reason="cancelled",
+                    sse_message_id=sse_message_id,
+                )
+            except Exception:
+                pass
             return fallback_msg
         except asyncio.CancelledError:
-            return "[User input was cancelled]"
+            # v1.2: 同上,推送 cancelled(不区分 timeout 与 cancel)。
+            try:
+                await _push_resolved_event_to_back_queue(
+                    request_id=request_id,
+                    umo=umo,
+                    reason="cancelled",
+                    sse_message_id=sse_message_id,
+                )
+            except Exception:
+                pass
+            return "[User input was cancelled] STOP ALL ACTIONS right now."
         finally:
             registry.remove(request_id)
 

@@ -13,7 +13,7 @@
   },
   "timeout_fallback_message": {
     "type": "string",
-    "default": "[User did not respond within {timeout} seconds. Please proceed with a reasonable default or inform the user that no response was received.]",
+    "default": "[User did not respond within {timeout} seconds.] STOP All Actions Right Now.",
     "description": "超时后工具返回给 LLM 的文本,{timeout} 会被替换为实际秒数"
   },
   "max_concurrent_pending": {

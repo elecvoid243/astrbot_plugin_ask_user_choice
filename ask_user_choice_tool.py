@@ -31,7 +31,7 @@ _TITLE_MAX = 30
 _LABEL_MAX = 30
 _DESCRIPTION_MAX = 200
 _INPUT_PLACEHOLDER_MAX = 60
-_EXTRA_CONTENT_MAX = 5000   # v1.1: 补充说明(Markdown)字符上限
+_EXTRA_CONTENT_MAX = 5000  # v1.1: 补充说明(Markdown)字符上限
 _OPTIONS_MIN = 2
 _OPTIONS_MAX = 10
 
@@ -103,6 +103,10 @@ class AskUserChoiceTool(FunctionTool):
             "required": ["prompt", "options"],
         }
     )
+
+    # Plugin config injected by AskUserChoicePlugin.initialize().
+    # Defaults to an empty dict so tests can create the tool without a config.
+    _plugin_config: dict = field(default_factory=dict)
 
     def _validate_and_build_spec(self, kwargs: dict) -> dict | str:
         """校验参数 + 截断 + 构造 spec dict。
@@ -278,13 +282,34 @@ class AskUserChoiceTool(FunctionTool):
         try:
             user_choice = await asyncio.wait_for(future, timeout=timeout_s)
         except asyncio.TimeoutError:
+            # Push resolved event so the frontend transitions to
+            # "cancelled"; failure must not prevent returning the
+            # fallback message to the LLM.
+            try:
+                await _push_resolved_event_to_back_queue(
+                    request_id=request_id,
+                    umo=umo,
+                    reason="cancelled",
+                    sse_message_id=sse_message_id,
+                )
+            except Exception:
+                pass
             return fallback_msg
         except asyncio.CancelledError:
-            return f"[User input was cancelled] STOP ALL ACTIONS right now."
+            try:
+                await _push_resolved_event_to_back_queue(
+                    request_id=request_id,
+                    umo=umo,
+                    reason="cancelled",
+                    sse_message_id=sse_message_id,
+                )
+            except Exception:
+                pass
+            return "[User input was cancelled] STOP ALL ACTIONS right now."
         finally:
             registry.remove(request_id)
 
-        # ── 8. 推 resolved 广播(失败不影响主流程) ──
+        # ── 8. 推 resolved 广播(成功提交,失败不影响主流程) ──
         try:
             await _push_resolved_event_to_back_queue(
                 request_id=request_id,
@@ -391,7 +416,11 @@ class AskUserChoiceTool(FunctionTool):
         await back_queue.put(
             {
                 "type": "interactive_choice_resolved",
-                "data": {"request_id": request_id, "reason": reason},
+                "data": {
+                    "request_id": request_id,
+                    "reason": reason,
+                    "umo": umo,
+                },
                 "message_id": sse_message_id,
             }
         )
@@ -405,6 +434,9 @@ class AskUserChoiceTool(FunctionTool):
         Returns:
             配置 dict;若读取失败或没有配置则返回 {}。
         """
+        if self._plugin_config:
+            return self._plugin_config
+        # Fallback for tests or when plugin hasn't injected config.
         try:
             return context.context.get_config() or {}
         except Exception:

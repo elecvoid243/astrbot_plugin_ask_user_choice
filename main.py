@@ -63,7 +63,7 @@ class AskUserChoicePlugin(Star):
             )
             return
 
-        self.context.add_llm_tools(AskUserChoiceTool())
+        self.context.add_llm_tools(AskUserChoiceTool(_plugin_config=dict(self.config)))
         _mount_api_router()
 
     async def terminate(self) -> None:

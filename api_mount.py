@@ -112,7 +112,11 @@ async def _push_resolved_event_to_back_queue(
     await back_queue.put(
         {
             "type": "interactive_choice_resolved",
-            "data": {"request_id": request_id, "reason": reason},
+            "data": {
+                "request_id": request_id,
+                "reason": reason,
+                "umo": umo,
+            },
             "message_id": sse_message_id,
         }
     )

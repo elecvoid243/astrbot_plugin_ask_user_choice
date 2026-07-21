@@ -221,7 +221,7 @@ class AskUserChoiceTool(FunctionTool):
 
         # ── 3. 配置加载 ──
         config = self._load_tool_config(context)
-        timeout_s = int(config.get("timeout_seconds", 300))
+        timeout_s = int(config.get("timeout_seconds", 1800))
         fallback_msg = config.get(
             "timeout_fallback_message",
             "[User did not respond within {timeout} seconds. "

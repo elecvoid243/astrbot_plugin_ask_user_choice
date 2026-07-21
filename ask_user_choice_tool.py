@@ -280,7 +280,7 @@ class AskUserChoiceTool(FunctionTool):
         except asyncio.TimeoutError:
             return fallback_msg
         except asyncio.CancelledError:
-            return "[User input was cancelled]"
+            return f"[User input was cancelled] {fallback_msg}"
         finally:
             registry.remove(request_id)
 

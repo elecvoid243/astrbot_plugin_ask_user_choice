@@ -103,6 +103,13 @@ class AskUserChoiceTool(FunctionTool):
             "required": ["prompt", "options"],
         }
     )
+    _plugin_config: dict = field(default_factory=dict)
+    """插件专属配置(由 main.py 构造时注入)。
+
+    来源: AskUserChoicePlugin.__init__ 收到的 AstrBotConfig,
+    即 _conf_schema.json 定义的那些字段(timeout_seconds 等)。
+    _load_tool_config() 优先读这里,fallback 到全局配置。
+    """
 
     def _validate_and_build_spec(self, kwargs: dict) -> dict | str:
         """校验参数 + 截断 + 构造 spec dict。
@@ -217,7 +224,7 @@ class AskUserChoiceTool(FunctionTool):
 
         # ── 3. 配置加载 ──
         config = self._load_tool_config(context)
-        timeout_s = int(config.get("timeout_seconds", 300))
+        timeout_s = int(config.get("timeout_seconds", 1800))
         fallback_msg = config.get(
             "timeout_fallback_message",
             "[User did not respond within {timeout} seconds. "
@@ -397,7 +404,7 @@ class AskUserChoiceTool(FunctionTool):
         )
 
     def _load_tool_config(self, context: ContextWrapper) -> dict:
-        """从插件 config 读配置。无法获取时返回空 dict(走默认值)。
+        """读取插件配置。优先使用构造时注入的 _plugin_config,fallback 到全局配置。
 
         Args:
             context: AstrBot 运行时上下文。
@@ -405,6 +412,8 @@ class AskUserChoiceTool(FunctionTool):
         Returns:
             配置 dict;若读取失败或没有配置则返回 {}。
         """
+        if self._plugin_config:
+            return self._plugin_config
         try:
             return context.context.get_config() or {}
         except Exception:

@@ -24,7 +24,7 @@
 #   - Spec: docs/superpowers/specs/2026-07-07-extra-content-field-amendment.md
 name: astrbot_plugin_ask_user
 display_name: Ask User Choice
-desc: 让 LLM 通过 ask_user_choice 工具向用户呈现可交互选项框（单选 + 自由输入）。v1.0 升级为真阻塞式:工具 await 用户选择,完成后直接返回结果,跨刷新持久化。v1.1 新增 `extra_content` 字段,支持 Markdown 补充说明(推荐/理由/注意事项/优缺点对比)。
+desc: 让 LLM 通过 ask_user_choice 工具向用户呈现可交互选项框（单选 + 自由输入）。该工具会阻塞事件传播，用户未选择则不执行
 version: v1.1.0
 author: elecvoid243
 repo: https://github.com/elecvoid243/astrbot_plugin_ask_user

@@ -16,7 +16,6 @@ from astrbot.api import FunctionTool, logger
 
 # lifted to module top per Plan Amendment B so tests can monkeypatch this binding
 from astrbot.core.platform.sources.webchat.webchat_queue_mgr import webchat_queue_mgr
-from astrbot.core.utils.io import get_astrbot_data_path  # noqa: F401
 
 from .api_mount import _mount_api_router, _push_resolved_event_to_back_queue
 from .interactive_choice_registry import registry

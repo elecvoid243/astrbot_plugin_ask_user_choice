@@ -3,7 +3,7 @@
 > 让 LLM 在需要人类审批/拍板时,通过 `ask_user_choice` 工具向用户呈现一个**可交互的选项框**。
 > **v1.0 起为真阻塞式**:工具在 `call()` 内 `await` 等待 dashboard 用户响应,用户点击选项(或输入自定义文本)后,选择结果**直接作为工具返回值**回传给 LLM(不再是新的 user message)。
 
-- **版本**: v1.1.0
+- **版本**: v1.1.1
 - **作者**: elecvoid243
 - **兼容**: AstrBot `>=4.16,<5`
 - **当前 spec**: [`docs/superpowers/specs/2026-07-02-blocking-interactive-choice-design.md`](docs/superpowers/specs/2026-07-02-blocking-interactive-choice-design.md)

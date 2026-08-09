@@ -125,10 +125,10 @@ plugin(module_path astrbot_plugin_ask_user) added LLM tool: ask_user_choice
 | `prompt` | ✓ | 200 字 | 提问文案,显示在选项框顶部 |
 | `options` | ✓ | 2~10 个 | 候选选项,单选 |
 | `options[].id` | ✓ | — | 唯一 ID,仅供前端 `:key`,不会发给 LLM |
-| `options[].label` | ✓ | 30 字 | 按钮上显示的文字(面向用户) |
-| `options[].description` | ✗ | 200 字 | 选项补充说明(面向用户) |
+| `options[].label` | ✓ | 80 字 | 按钮上显示的文字(面向用户) |
+| `options[].description` | ✗ | 1000 字 | 选项补充说明(面向用户) |
 | `options[].value` | ✓ | 不限 | 选中后回传给 LLM 的文本(面向 LLM) |
-| `title` | ✗ | 30 字 | 选项框标题,例如 "模型选择" |
+| `title` | ✗ | 80 字 | 选项框标题,例如 "模型选择" |
 | `input_placeholder` | ✗ | 60 字 | 自由输入框的占位符 |
 | `extra_content` | ✗ | 5000 字 | **v1.1 新增** 补充说明(Markdown 文本),用于承载 LLM 给用户看的推荐/理由/注意事项/优缺点对比,前端按 Markdown 渲染。**不**回传到 LLM tool result |
 
@@ -251,7 +251,7 @@ async def test_missing_prompt():
 | `prompt` 必填,200 字截断 | §3.2 字段约束 |
 | `options` 2-10 个,每项必填 `id` / `label` / `value` | §3.2 字段约束 |
 | `id` 重复时拒绝 | §3.2 + §7 错误处理 |
-| `title` 可选,30 字截断 | §3.2 字段约束 |
+| `title` 可选,80 字截断 | §3.2 字段约束 |
 | `input_placeholder` 可选,60 字截断 | §3.2 字段约束 |
 | 返回 JSON 字符串,framework 走 Plain 包装 | §2.3 + §6 数据流 |
 | 前端 `normalizePartsInternal` 展平 | §2.3 翻译位置 |

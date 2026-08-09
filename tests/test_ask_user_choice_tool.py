@@ -5,15 +5,14 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
-
 from astrbot_plugin_ask_user_choice.ask_user_choice_tool import (
+    _DESCRIPTION_MAX,
     _LABEL_MAX,
     _OPTIONS_MAX,
     _PROMPT_MAX,
     AskUserChoiceTool,
 )
 from astrbot_plugin_ask_user_choice.interactive_choice_registry import registry
-
 
 # ── Auto-use fixture: mock lazy mount so tool call() doesn't fail ─────
 
@@ -138,6 +137,22 @@ def test_validate_truncates_long_label():
     )
     assert isinstance(result, dict)
     assert len(result["options"][0]["label"]) == _LABEL_MAX
+
+
+def test_validate_truncates_long_description():
+    tool = AskUserChoiceTool()
+    long_desc = "d" * (_DESCRIPTION_MAX + 50)
+    result = tool._validate_and_build_spec(
+        {
+            "prompt": "test",
+            "options": [
+                {"id": "A", "label": "a", "description": long_desc},
+                {"id": "B", "label": "b"},
+            ],
+        }
+    )
+    assert isinstance(result, dict)
+    assert len(result["options"][0]["description"]) == _DESCRIPTION_MAX
 
 
 # ── call() 流程测试 (Task 6) ──────────────────────────────

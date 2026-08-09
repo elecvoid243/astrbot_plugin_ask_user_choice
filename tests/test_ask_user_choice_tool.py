@@ -258,6 +258,50 @@ async def test_call_timeout_returns_fallback(monkeypatch):
         options=[{"id": "A", "label": "a"}, {"id": "B", "label": "b"}],
     )
     assert "did not respond" in result
+
+
+@pytest.mark.asyncio
+async def test_call_timeout_broadcasts_cancelled(monkeypatch):
+    """超时路径:除返回 fallback 外,还应广播 resolved{cancelled} 事件。
+
+    前端 applyInteractiveChoiceResolved 只认 reason="cancelled";广播后
+    其他标签页的候选框能即时切到「已取消」,而不必等 reconcile 兜底。
+    """
+    tool = AskUserChoiceTool()
+    ctx = _make_context()
+
+    async def fake_push(*args, **kwargs):
+        pass
+
+    resolved_calls = []
+
+    async def fake_resolved(*args, **kwargs):
+        resolved_calls.append(kwargs)
+
+    monkeypatch.setattr(tool, "_push_to_webchat_back_queue", fake_push)
+    monkeypatch.setattr(tool, "_push_resolved_to_back_queue", fake_resolved)
+    monkeypatch.setattr(
+        tool,
+        "_load_tool_config",
+        lambda ctx: {
+            "timeout_seconds": 1,
+            "timeout_fallback_message": "[User did not respond within 1 seconds.]",
+            "max_concurrent_pending": 32,
+        },
+    )
+
+    result = await tool.call(
+        ctx,
+        prompt="Pick one",
+        options=[{"id": "A", "label": "a"}, {"id": "B", "label": "b"}],
+    )
+    assert "did not respond" in result
+    # 超时必须广播一次 reason="cancelled" 的 resolved 事件
+    assert len(resolved_calls) == 1
+    assert resolved_calls[0]["reason"] == "cancelled"
+    assert resolved_calls[0]["umo"] == "webchat:FriendMessage:webchat!alice!sess"
+    assert resolved_calls[0]["sse_message_id"] == "stream-msg-id"
+    # registry 已被 finally 清理
     assert len(registry._pending) == 0
 
 

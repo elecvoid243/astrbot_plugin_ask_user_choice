@@ -30,7 +30,7 @@ _TITLE_MAX = 80
 _LABEL_MAX = 80
 _DESCRIPTION_MAX = 1000
 _INPUT_PLACEHOLDER_MAX = 60
-_EXTRA_CONTENT_MAX = 5000   # v1.1: 补充说明(Markdown)字符上限
+_EXTRA_CONTENT_MAX = 5000  # v1.1: 补充说明(Markdown)字符上限
 _OPTIONS_MIN = 2
 _OPTIONS_MAX = 10
 
@@ -284,6 +284,19 @@ class AskUserChoiceTool(FunctionTool):
         try:
             user_choice = await asyncio.wait_for(future, timeout=timeout_s)
         except asyncio.TimeoutError:
+            # 超时即时置灰:广播 resolved{cancelled},让其他标签页的候选框
+            # 立刻切到「已取消」,不必等前端 reconcile() 兜底发现。
+            # best-effort:广播失败不影响 fallback 返回(前端乐观超时
+            # 倒计时与 reconcile 仍会兜底)。
+            try:
+                await self._push_resolved_to_back_queue(
+                    request_id=request_id,
+                    umo=umo,
+                    reason="cancelled",
+                    sse_message_id=sse_message_id,
+                )
+            except Exception:
+                pass
             return fallback_msg
         except asyncio.CancelledError:
             return f"[User input was cancelled] {fallback_msg}"
